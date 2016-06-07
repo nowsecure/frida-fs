@@ -1,0 +1,29 @@
+{
+  "name": "@viaforensics/frida-fs",
+  "version": "1.0.0",
+  "description": "Create a stream from a filesystem resource",
+  "main": "index.js",
+  "browserify": {
+    "transform": [
+      [
+        "babelify",
+        {
+          "presets": [
+            "es2015"
+          ]
+        }
+      ]
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/viaforensics/frida-fs.git"
+  },
+  "bugs": {
+    "url": "https://github.com/viaforensics/frida-fs/issues"
+  },
+  "homepage": "https://github.com/viaforensics/frida-fs#readme",
+  "dependencies": {
+    "stream": "0.0.2"
+  }
+}
