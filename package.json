@@ -1,5 +1,5 @@
 {
-  "name": "@viaforensics/frida-fs",
+  "name": "frida-fs",
   "version": "1.0.0",
   "description": "Create a stream from a filesystem resource",
   "main": "index.js",
@@ -17,12 +17,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/viaforensics/frida-fs.git"
+    "url": "git+https://github.com/nowsecure/frida-fs.git"
   },
+  "license": "MIT",
   "bugs": {
-    "url": "https://github.com/viaforensics/frida-fs/issues"
+    "url": "https://github.com/nowsecure/frida-fs/issues"
   },
-  "homepage": "https://github.com/viaforensics/frida-fs#readme",
+  "homepage": "https://github.com/nowsecure/frida-fs#readme",
   "dependencies": {
     "stream": "0.0.2"
   }
