@@ -1,6 +1,6 @@
 {
   "name": "frida-fs",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Create a stream from a filesystem resource",
   "main": "index.js",
   "browserify": {
