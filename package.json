@@ -23,8 +23,5 @@
   "bugs": {
     "url": "https://github.com/nowsecure/frida-fs/issues"
   },
-  "homepage": "https://github.com/nowsecure/frida-fs#readme",
-  "dependencies": {
-    "stream": "0.0.2"
-  }
+  "homepage": "https://github.com/nowsecure/frida-fs#readme"
 }
