@@ -48,8 +48,53 @@ class ReadStream extends stream.Readable {
   }
 }
 
+class WriteStream extends stream.Writable {
+  constructor(path) {
+    super({
+      highWaterMark: 4 * 1024 * 1024
+    });
+
+    this._output = null;
+    this._writeRequest = null;
+
+    const pathStr = Memory.allocUtf8String(path);
+    /*
+     * flags = O_WRONLY | O_CREAT (= 0x201)
+     * mode  = 0644               (= 0x1a4)
+     */
+    const fd = open(pathStr, 0x201, 0x1a4);
+    if (fd === -1) {
+      this.emit('error', new Error('Unable to open file'));
+      this.push(null);
+      return;
+    }
+
+    this._output = new UnixOutputStream(fd, { autoClose: true });
+  }
+
+  _write(chunk, encoding, callback) {
+    if (this._writeRequest !== null)
+      return;
+
+    this._writeRequest = this._output.write(chunk)
+    .then(size => {
+      this._writeRequest = null;
+
+      callback();
+    })
+    .catch(error => {
+      this._writeRequest = null;
+
+      callback(error);
+    });
+  }
+}
+
 module.exports = {
   createReadStream(path) {
     return new ReadStream(path);
+  },
+  createWriteStream(path) {
+    return new WriteStream(path);
   }
 };
