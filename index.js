@@ -87,7 +87,7 @@ class WriteStream extends stream.Writable {
     if (this._writeRequest !== null)
       return;
 
-    this._writeRequest = this._output.write(chunk)
+    this._writeRequest = this._output.writeAll(chunk)
     .then(size => {
       this._writeRequest = null;
 
