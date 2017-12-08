@@ -2,8 +2,6 @@
 
 const stream = require('stream');
 
-const open = new SystemFunction(Module.findExportByName(null, 'open'), 'int', ['pointer', 'int', 'int']);
-const strerror = new NativeFunction(Module.findExportByName(null, 'strerror'), 'pointer', ['int']);
 
 class ReadStream extends stream.Readable {
   constructor(path) {
@@ -108,8 +106,90 @@ class WriteStream extends stream.Writable {
   }
 }
 
+function readdirSync(path) {
+  const {opendir, closedir, readdir} = getApi();
+
+  const dir = opendir(Memory.allocUtf8String(path));
+  const dirHandle = dir.value;
+  if (dirHandle.isNull())
+    throw new Error(`Unable to open directory (${getErrorString(dir.errno)})`);
+
+  try {
+    const entries = [];
+
+    let entry;
+    while (!((entry = readdir(dirHandle)).isNull())) {
+      const name = Memory.readUtf8String(entry.add(8));
+      entries.push(name);
+    }
+
+    return entries;
+  } finally {
+    closedir(dirHandle);
+  }
+}
+
+function statSync(path) {
+}
+
 function getErrorString(errno) {
   return Memory.readUtf8String(strerror(errno));
+}
+
+function callbackify(original) {
+  return function (...args) {
+    const numArgsMinusOne = args.length - 1;
+
+    const implArgs = args.slice(0, numArgsMinusOne);
+    const callback = args[numArgsMinusOne];
+
+    process.nextTick(function () {
+      try {
+        const result = original(...implArgs);
+        callback(null, result);
+      } catch (e) {
+        callback(e);
+      }
+    });
+  };
+}
+
+const SF = SystemFunction;
+const NF = NativeFunction;
+
+const apiSpec = [
+  ['open', SF, 'int', ['pointer', 'int', '...', 'int']],
+  ['opendir', SF, 'pointer', ['pointer']],
+  ['closedir', NF, 'int', ['pointer']],
+  ['readdir', NF, 'pointer', ['pointer']],
+  ['strerror', NF, 'pointer', ['int']],
+];
+
+let cachedApi = null;
+function getApi() {
+  if (cachedApi === null) {
+    cachedApi = apiSpec.reduce((api, entry) => {
+      addApiPlaceholder(api, entry);
+      return api;
+    }, {});
+  }
+  return cachedApi;
+}
+
+function addApiPlaceholder(api, entry) {
+  const [name] = entry;
+
+  Object.defineProperty(api, name, {
+    configurable: true,
+    get() {
+      const [, Ctor, retType, argTypes] = entry;
+
+      const impl = new Ctor(Module.findExportByName(null, name), retType, argTypes);
+      Object.defineProperty(api, name, { value: impl });
+
+      return impl;
+    }
+  });
 }
 
 module.exports = {
@@ -118,5 +198,9 @@ module.exports = {
   },
   createWriteStream(path) {
     return new WriteStream(path);
-  }
+  },
+  readdir: callbackify(readdirSync),
+  readdirSync,
+  stat: callbackify(readdirSync),
+  statSync,
 };
