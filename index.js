@@ -186,7 +186,200 @@ function readdirSync(path) {
   }
 }
 
+const statFields = new Set([
+  'dev',
+  'mode',
+  'nlink',
+  'uid',
+  'gid',
+  'rdev',
+  'blksize',
+  'ino',
+  'size',
+  'blocks',
+  'atimeMs',
+  'mtimeMs',
+  'ctimeMs',
+  'birthtimeMs',
+  'atime',
+  'mtime',
+  'ctime',
+  'birthtime',
+]);
+const statSpecs = {
+  'darwin-32': {
+    size: 108,
+    fields: {
+      'dev': [ 0, 'S32' ],
+      'mode': [ 4, 'U16' ],
+      'nlink': [ 6, 'U16' ],
+      'ino': [ 8, 'U64' ],
+      'uid': [ 16, 'U32' ],
+      'gid': [ 20, 'U32' ],
+      'rdev': [ 24, 'S32' ],
+      'atime': [ 28, readTimespec32 ],
+      'mtime': [ 36, readTimespec32 ],
+      'ctime': [ 44, readTimespec32 ],
+      'birthtime': [ 52, readTimespec32 ],
+      'size': [ 60, 'S64' ],
+      'blocks': [ 68, 'S64' ],
+      'blksize': [ 76, 'S32' ],
+    }
+  },
+  'darwin-64': {
+    size: 144,
+    fields: {
+      'dev': [ 0, 'S32' ],
+      'mode': [ 4, 'U16' ],
+      'nlink': [ 6, 'U16' ],
+      'ino': [ 8, 'U64' ],
+      'uid': [ 16, 'U32' ],
+      'gid': [ 20, 'U32' ],
+      'rdev': [ 24, 'S32' ],
+      'atime': [ 32, readTimespec64 ],
+      'mtime': [ 48, readTimespec64 ],
+      'ctime': [ 64, readTimespec64 ],
+      'birthtime': [ 80, readTimespec64 ],
+      'size': [ 96, 'S64' ],
+      'blocks': [ 104, 'S64' ],
+      'blksize': [ 112, 'S32' ],
+    }
+  },
+  'linux-32': {
+    size: 88,
+    fields: {
+      'dev': [ 0, 'U64' ],
+      'mode': [ 16, 'U32' ],
+      'nlink': [ 20, 'U32' ],
+      'ino': [ 12, 'U32' ],
+      'uid': [ 24, 'U32' ],
+      'gid': [ 28, 'U32' ],
+      'rdev': [ 32, 'U64' ],
+      'atime': [ 56, readTimespec32 ],
+      'mtime': [ 64, readTimespec32 ],
+      'ctime': [ 72, readTimespec32 ],
+      'size': [ 44, 'S32' ],
+      'blocks': [ 52, 'S32' ],
+      'blksize': [ 48, 'S32' ],
+    }
+  },
+  'linux-64': {
+    size: 144,
+    fields: {
+      'dev': [ 0, 'U64' ],
+      'mode': [ 24, 'U32' ],
+      'nlink': [ 16, 'U64' ],
+      'ino': [ 8, 'U64' ],
+      'uid': [ 28, 'U32' ],
+      'gid': [ 32, 'U32' ],
+      'rdev': [ 40, 'U64' ],
+      'atime': [ 72, readTimespec64 ],
+      'mtime': [ 88, readTimespec64 ],
+      'ctime': [ 104, readTimespec64 ],
+      'size': [ 48, 'S64' ],
+      'blocks': [ 64, 'S64' ],
+      'blksize': [ 56, 'S64' ],
+    },
+  },
+};
+const statSpec = statSpecs[`${Process.platform}-${Process.pointerSize * 8}`] || null;
+const statBufSize = 256;
+
+function Stats() {
+}
+
 function statSync(path) {
+  if (statSpec === null)
+    throw new Error('Current OS is not yet supported; please open a PR');
+
+  const api = getApi();
+  const stat = api.stat64 || api.stat;
+
+  const buf = Memory.alloc(statBufSize);
+  const result = stat(Memory.allocUtf8String(path), buf);
+  if (result.value !== 0)
+    throw new Error(`Unable to stat ${path} (${getErrorString(result.errno)})`);
+
+  return new Proxy(new Stats(), {
+    has(target, property) {
+      return statsHasField(property);
+    },
+    get(target, property, receiver) {
+      switch (property) {
+        case 'prototype':
+        case 'constructor':
+        case 'toString':
+          return target[property];
+        case 'hasOwnProperty':
+          return statsHasField;
+        case 'valueOf':
+          return receiver;
+        case 'buffer':
+          return buf;
+        default:
+          const value = statsReadField.call(receiver, property);
+          return (value !== null) ? value : undefined;
+      }
+    },
+    set(target, property, value, receiver) {
+      return false;
+    },
+    ownKeys(target) {
+      return Array.from(statFields);
+    },
+    getOwnPropertyDescriptor(target, property) {
+      return {
+        writable: false,
+        configurable: true,
+        enumerable: true
+      };
+    },
+  });
+}
+
+function statsHasField(name) {
+  return statFields.has(name);
+}
+
+function statsReadField(name) {
+  let field = statSpec.fields[name];
+  if (field === undefined) {
+    if (name === 'birthtime') {
+      return statsReadField.call(this, 'ctime');
+    }
+
+    const msPos = name.lastIndexOf('Ms');
+    if (msPos === name.length - 2) {
+      return statsReadField.call(this, name.substr(0, msPos)).getTime();
+    }
+
+    return undefined;
+  }
+
+  const [offset, type] = field;
+
+  const read = (typeof type === 'string') ? Memory['read' + type] : type;
+
+  const value = read(this.buffer.add(offset));
+  if (value instanceof Int64 || value instanceof UInt64)
+    return value.valueOf();
+
+  return value;
+}
+
+function readTimespec32(address) {
+  const sec = Memory.readU32(address);
+  const nsec = Memory.readU32(address.add(4));
+  const msec = nsec / 1000000;
+  return new Date((sec * 1000) + msec);
+}
+
+function readTimespec64(address) {
+  // FIXME: Improve UInt64 to support division
+  const sec = Memory.readU64(address).valueOf();
+  const nsec = Memory.readU64(address.add(8)).valueOf();
+  const msec = nsec / 1000000;
+  return new Date((sec * 1000) + msec);
 }
 
 function getErrorString(errno) {
@@ -219,6 +412,8 @@ const apiSpec = [
   ['opendir', SF, 'pointer', ['pointer']],
   ['closedir', NF, 'int', ['pointer']],
   ['readdir', NF, 'pointer', ['pointer']],
+  ['stat', SF, 'int', ['pointer', 'pointer']],
+  ['stat64', SF, 'int', ['pointer', 'pointer']],
   ['strerror', NF, 'pointer', ['int']],
 ];
 
@@ -241,7 +436,11 @@ function addApiPlaceholder(api, entry) {
     get() {
       const [, Ctor, retType, argTypes] = entry;
 
-      const impl = new Ctor(Module.findExportByName(null, name), retType, argTypes);
+      let impl = null;
+      const address = Module.findExportByName(null, name);
+      if (address !== null)
+        impl = new Ctor(address, retType, argTypes);
+
       Object.defineProperty(api, name, { value: impl });
 
       return impl;
