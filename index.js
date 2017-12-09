@@ -24,6 +24,16 @@ const universalConstants = {
   S_IROTH: 4,
   S_IWOTH: 2,
   S_IXOTH: 1,
+
+  DT_UNKNOWN: 0,
+  DT_FIFO: 1,
+  DT_CHR: 2,
+  DT_DIR: 4,
+  DT_BLK: 6,
+  DT_REG: 8,
+  DT_LNK: 10,
+  DT_SOCK: 12,
+  DT_WHT: 14,
 };
 const platformConstants = {
   darwin: {
@@ -164,6 +174,26 @@ class WriteStream extends stream.Writable {
 }
 
 function readdirSync(path) {
+  const entries = [];
+  enumerateDirectoryEntries(path, entry => {
+    const name = Memory.readUtf8String(entry.add(8));
+    entries.push(name);
+  });
+  return entries;
+}
+
+function list(path) {
+  const entries = [];
+  enumerateDirectoryEntries(path, entry => {
+    entries.push({
+      name: Memory.readUtf8String(entry.add(8)),
+      type: Memory.readU8(entry.add(6))
+    });
+  });
+  return entries;
+}
+
+function enumerateDirectoryEntries(path, callback) {
   const {opendir, closedir, readdir} = getApi();
 
   const dir = opendir(Memory.allocUtf8String(path));
@@ -172,15 +202,10 @@ function readdirSync(path) {
     throw new Error(`Unable to open directory (${getErrorString(dir.errno)})`);
 
   try {
-    const entries = [];
-
     let entry;
     while (!((entry = readdir(dirHandle)).isNull())) {
-      const name = Memory.readUtf8String(entry.add(8));
-      entries.push(name);
+      callback(entry);
     }
-
-    return entries;
   } finally {
     closedir(dirHandle);
   }
@@ -458,6 +483,7 @@ module.exports = {
   },
   readdir: callbackify(readdirSync),
   readdirSync,
+  list,
   stat: callbackify(readdirSync),
   statSync,
 };
