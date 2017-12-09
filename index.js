@@ -2,6 +2,8 @@
 
 const stream = require('stream');
 
+const {platform, pointerSize} = Process;
+
 const universalConstants = {
   S_IFMT: 0xf000,
   S_IFREG: 0x8000,
@@ -70,7 +72,13 @@ const platformConstants = {
     O_NONBLOCK: 0x800,
   },
 };
-const constants = Object.assign({}, universalConstants, platformConstants[Process.platform] || {});
+const constants = Object.assign({}, universalConstants, platformConstants[platform] || {});
+
+const SEEK_SET = 0;
+const SEEK_CUR = 1;
+const SEEK_END = 2;
+
+const EINTR = 4;
 
 class ReadStream extends stream.Readable {
   constructor(path) {
@@ -211,6 +219,53 @@ function enumerateDirectoryEntries(path, callback) {
   }
 }
 
+function readFileSync(path, options = {}) {
+  if (typeof options === 'string')
+    options = { encoding: options };
+  const {encoding = null} = options;
+
+  const {open, close, lseek, read} = getApi();
+
+  const pathStr = Memory.allocUtf8String(path);
+  const openResult = open(pathStr, constants.O_RDONLY, 0);
+  const fd = openResult.value;
+  if (fd === -1)
+    throw new Error(`Unable to open file (${getErrorString(openResult.errno)})`);
+
+  try {
+    const fileSize = lseek(fd, 0, SEEK_END);
+
+    lseek(fd, 0, SEEK_SET);
+
+    const buf = Memory.alloc(fileSize);
+    let readResult, n, readFailed;
+    do {
+      readResult = read(fd, buf, fileSize);
+      n = readResult.value.valueOf();
+      readFailed = n === -1;
+    } while (readFailed && readResult.errno === EINTR);
+
+    if (readFailed)
+      throw new Error(`Unable to read ${path} (${getErrorString(readResult.errno)})`);
+
+    if (n !== fileSize.valueOf())
+      throw new Error('Short read');
+
+    if (encoding === 'utf8') {
+      return Memory.readUtf8String(buf, fileSize);
+    }
+
+    const value = Buffer.from(Memory.readByteArray(buf, fileSize));
+    if (encoding !== null) {
+      return value.toString(encoding);
+    }
+
+    return value;
+  } finally {
+    close(fd);
+  }
+}
+
 const statFields = new Set([
   'dev',
   'mode',
@@ -307,7 +362,7 @@ const statSpecs = {
     },
   },
 };
-const statSpec = statSpecs[`${Process.platform}-${Process.pointerSize * 8}`] || null;
+const statSpec = statSpecs[`${platform}-${pointerSize * 8}`] || null;
 const statBufSize = 256;
 
 function Stats() {
@@ -432,8 +487,14 @@ function callbackify(original) {
 const SF = SystemFunction;
 const NF = NativeFunction;
 
+const sizeType = (pointerSize === 8) ? 'int64' : 'int32';
+const offsetType = (platform === 'darwin' || pointerSize === 8) ? 'int64' : 'int32';
+
 const apiSpec = [
   ['open', SF, 'int', ['pointer', 'int', '...', 'int']],
+  ['close', NF, 'int', ['int']],
+  ['lseek', NF, offsetType, ['int', offsetType, 'int']],
+  ['read', SF, sizeType, ['int', 'pointer', sizeType]],
   ['opendir', SF, 'pointer', ['pointer']],
   ['closedir', NF, 'int', ['pointer']],
   ['readdir', NF, 'pointer', ['pointer']],
@@ -484,6 +545,8 @@ module.exports = {
   readdir: callbackify(readdirSync),
   readdirSync,
   list,
+  readFile: callbackify(readFileSync),
+  readFileSync,
   stat: callbackify(readdirSync),
   statSync,
 };
