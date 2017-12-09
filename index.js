@@ -2,6 +2,65 @@
 
 const stream = require('stream');
 
+const universalConstants = {
+  S_IFMT: 0xf000,
+  S_IFREG: 0x8000,
+  S_IFDIR: 0x4000,
+  S_IFCHR: 0x2000,
+  S_IFBLK: 0x6000,
+  S_IFIFO: 0x1000,
+  S_IFLNK: 0xa000,
+  S_IFSOCK: 0xc000,
+
+  S_IRWXU: 448,
+  S_IRUSR: 256,
+  S_IWUSR: 128,
+  S_IXUSR: 64,
+  S_IRWXG: 56,
+  S_IRGRP: 32,
+  S_IWGRP: 16,
+  S_IXGRP: 8,
+  S_IRWXO: 7,
+  S_IROTH: 4,
+  S_IWOTH: 2,
+  S_IXOTH: 1,
+};
+const platformConstants = {
+  darwin: {
+    O_RDONLY: 0x0,
+    O_WRONLY: 0x1,
+    O_RDWR: 0x2,
+    O_CREAT: 0x200,
+    O_EXCL: 0x800,
+    O_NOCTTY: 0x20000,
+    O_TRUNC: 0x400,
+    O_APPEND: 0x8,
+    O_DIRECTORY: 0x100000,
+    O_NOFOLLOW: 0x100,
+    O_SYNC: 0x80,
+    O_DSYNC: 0x400000,
+    O_SYMLINK: 0x200000,
+    O_NONBLOCK: 0x4,
+  },
+  linux: {
+    O_RDONLY: 0x0,
+    O_WRONLY: 0x1,
+    O_RDWR: 0x2,
+    O_CREAT: 0x40,
+    O_EXCL: 0x80,
+    O_NOCTTY: 0x100,
+    O_TRUNC: 0x200,
+    O_APPEND: 0x400,
+    O_DIRECTORY: 0x10000,
+    O_NOATIME: 0x40000,
+    O_NOFOLLOW: 0x20000,
+    O_SYNC: 0x101000,
+    O_DSYNC: 0x1000,
+    O_DIRECT: 0x4000,
+    O_NONBLOCK: 0x800,
+  },
+};
+const constants = Object.assign({}, universalConstants, platformConstants[Process.platform] || {});
 
 class ReadStream extends stream.Readable {
   constructor(path) {
@@ -193,6 +252,7 @@ function addApiPlaceholder(api, entry) {
 }
 
 module.exports = {
+  constants,
   createReadStream(path) {
     return new ReadStream(path);
   },
