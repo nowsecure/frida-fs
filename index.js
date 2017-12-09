@@ -72,7 +72,7 @@ class ReadStream extends stream.Readable {
     this._readRequest = null;
 
     const pathStr = Memory.allocUtf8String(path);
-    const fd = open(pathStr, 0, 0);
+    const fd = getApi().open(pathStr, constants.O_RDONLY, 0);
     if (fd.value === -1) {
       this.emit('error', new Error(`Unable to open file (${getErrorString(fd.errno)})`));
       this.push(null);
@@ -124,11 +124,9 @@ class WriteStream extends stream.Writable {
     this._writeRequest = null;
 
     const pathStr = Memory.allocUtf8String(path);
-    /*
-     * flags = O_WRONLY | O_CREAT (= 0x201)
-     * mode  = 0644               (= 0x1a4)
-     */
-    const fd = open(pathStr, 0x201, 0x1a4);
+    const flags = constants.O_WRONLY | constants.O_CREAT;
+    const mode = constants.S_IRUSR | constants.S_IWUSR | constants.S_IRGRP | constants.S_IROTH;
+    const fd = getApi().open(pathStr, flags, mode);
     if (fd.value === -1) {
       this.emit('error', new Error(`Unable to open file (${getErrorString(fd.errno)})`));
       this.push(null);
