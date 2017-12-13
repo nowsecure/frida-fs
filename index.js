@@ -233,7 +233,7 @@ function readFileSync(path, options = {}) {
     throw new Error(`Unable to open file (${getErrorString(openResult.errno)})`);
 
   try {
-    const fileSize = lseek(fd, 0, SEEK_END);
+    const fileSize = lseek(fd, 0, SEEK_END).valueOf();
 
     lseek(fd, 0, SEEK_SET);
 
@@ -264,6 +264,23 @@ function readFileSync(path, options = {}) {
   } finally {
     close(fd);
   }
+}
+
+function readlinkSync(path) {
+  const api = getApi();
+
+  const pathStr = Memory.allocUtf8String(path);
+
+  const linkSize = lstatSync(path).size.valueOf();
+  console.log('linkSize=' + linkSize);
+  const buf = Memory.alloc(linkSize);
+
+  const result = api.readlink(pathStr, buf, linkSize);
+  const n = result.value.valueOf();
+  if (n === -1)
+    throw new Error(`Unable to read link (${getErrorString(result.errno)})`);
+
+  return Memory.readUtf8String(buf, n);
 }
 
 const statFields = new Set([
@@ -369,14 +386,23 @@ function Stats() {
 }
 
 function statSync(path) {
+  const api = getApi();
+  const impl = api.stat64 || api.stat;
+  return performStat(impl, path);
+}
+
+function lstatSync(path) {
+  const api = getApi();
+  const impl = api.lstat64 || api.lstat;
+  return performStat(impl, path);
+}
+
+function performStat(impl, path) {
   if (statSpec === null)
     throw new Error('Current OS is not yet supported; please open a PR');
 
-  const api = getApi();
-  const stat = api.stat64 || api.stat;
-
   const buf = Memory.alloc(statBufSize);
-  const result = stat(Memory.allocUtf8String(path), buf);
+  const result = impl(Memory.allocUtf8String(path), buf);
   if (result.value !== 0)
     throw new Error(`Unable to stat ${path} (${getErrorString(result.errno)})`);
 
@@ -487,19 +513,23 @@ function callbackify(original) {
 const SF = SystemFunction;
 const NF = NativeFunction;
 
-const sizeType = (pointerSize === 8) ? 'int64' : 'int32';
+const ssizeType = (pointerSize === 8) ? 'int64' : 'int32';
+const sizeType = 'u' + ssizeType;
 const offsetType = (platform === 'darwin' || pointerSize === 8) ? 'int64' : 'int32';
 
 const apiSpec = [
   ['open', SF, 'int', ['pointer', 'int', '...', 'int']],
   ['close', NF, 'int', ['int']],
   ['lseek', NF, offsetType, ['int', offsetType, 'int']],
-  ['read', SF, sizeType, ['int', 'pointer', sizeType]],
+  ['read', SF, ssizeType, ['int', 'pointer', sizeType]],
   ['opendir', SF, 'pointer', ['pointer']],
   ['closedir', NF, 'int', ['pointer']],
   ['readdir', NF, 'pointer', ['pointer']],
+  ['readlink', SF, ssizeType, ['pointer', 'pointer', sizeType]],
   ['stat', SF, 'int', ['pointer', 'pointer']],
   ['stat64', SF, 'int', ['pointer', 'pointer']],
+  ['lstat', SF, 'int', ['pointer', 'pointer']],
+  ['lstat64', SF, 'int', ['pointer', 'pointer']],
   ['strerror', NF, 'pointer', ['int']],
 ];
 
@@ -547,6 +577,10 @@ module.exports = {
   list,
   readFile: callbackify(readFileSync),
   readFileSync,
-  stat: callbackify(readdirSync),
+  readlink: callbackify(readlinkSync),
+  readlinkSync,
+  stat: callbackify(statSync),
   statSync,
+  lstat: callbackify(lstatSync),
+  lstatSync,
 };
