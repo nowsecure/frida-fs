@@ -272,7 +272,6 @@ function readlinkSync(path) {
   const pathStr = Memory.allocUtf8String(path);
 
   const linkSize = lstatSync(path).size.valueOf();
-  console.log('linkSize=' + linkSize);
   const buf = Memory.alloc(linkSize);
 
   const result = api.readlink(pathStr, buf, linkSize);
