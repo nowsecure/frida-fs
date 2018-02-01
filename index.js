@@ -488,7 +488,7 @@ function readTimespec64(address) {
 }
 
 function getErrorString(errno) {
-  return Memory.readUtf8String(strerror(errno));
+  return Memory.readUtf8String(getApi().strerror(errno));
 }
 
 function callbackify(original) {
