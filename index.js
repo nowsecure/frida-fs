@@ -595,5 +595,5 @@ module.exports = {
   lstat: callbackify(lstatSync),
   lstatSync,
   unlink: callbackify(unlinkSync),
-  unlinkSync
+  unlinkSync,
 };
