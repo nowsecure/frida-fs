@@ -197,7 +197,7 @@ const direntSpec = direntSpecs[platform];
 function readdirSync(path) {
   const entries = [];
   enumerateDirectoryEntries(path, entry => {
-    const name = direntReadField(entry, 'd_name');
+    const name = readDirentField(entry, 'd_name');
     entries.push(name);
   });
   return entries;
@@ -207,8 +207,8 @@ function list(path) {
   const entries = [];
   enumerateDirectoryEntries(path, entry => {
     entries.push({
-      name: direntReadField(entry, 'd_name'),
-      type: direntReadField(entry, 'd_type')
+      name: readDirentField(entry, 'd_name'),
+      type: readDirentField(entry, 'd_type')
     });
   });
   return entries;
@@ -235,7 +235,7 @@ function enumerateDirectoryEntries(path, callback) {
   }
 }
 
-function direntReadField(entry, name) {
+function readDirentField(entry, name) {
   const [offset, type] = direntSpec[name];
 
   const read = (typeof type === 'string') ? Memory['read' + type] : type;
