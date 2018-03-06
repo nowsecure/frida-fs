@@ -181,10 +181,23 @@ class WriteStream extends stream.Writable {
   }
 }
 
+const direntSpecs = {
+  linux: {
+    'd_name': [19, 'Utf8String'],
+    'd_type': [18, 'U8']
+  },
+  darwin: {
+    'd_name': [21, 'Utf8String'],
+    'd_type': [20, 'U8']
+  }
+};
+
+const direntSpec = direntSpecs[platform];
+
 function readdirSync(path) {
   const entries = [];
   enumerateDirectoryEntries(path, entry => {
-    const name = Memory.readUtf8String(entry.add(8));
+    const name = direntReadField(entry, 'd_name');
     entries.push(name);
   });
   return entries;
@@ -194,29 +207,44 @@ function list(path) {
   const entries = [];
   enumerateDirectoryEntries(path, entry => {
     entries.push({
-      name: Memory.readUtf8String(entry.add(8)),
-      type: Memory.readU8(entry.add(6))
+      name: direntReadField(entry, 'd_name'),
+      type: direntReadField(entry, 'd_type')
     });
   });
   return entries;
 }
 
 function enumerateDirectoryEntries(path, callback) {
-  const {opendir, closedir, readdir} = getApi();
+  const {opendir, opendir$INODE64, closedir, readdir, readdir$INODE64} = getApi();
 
-  const dir = opendir(Memory.allocUtf8String(path));
+  const opendirImpl = opendir$INODE64 || opendir;
+  const readdirImpl = readdir$INODE64 || readdir;
+
+  const dir = opendirImpl(Memory.allocUtf8String(path));
   const dirHandle = dir.value;
   if (dirHandle.isNull())
     throw new Error(`Unable to open directory (${getErrorString(dir.errno)})`);
 
   try {
     let entry;
-    while (!((entry = readdir(dirHandle)).isNull())) {
+    while (!((entry = readdirImpl(dirHandle)).isNull())) {
       callback(entry);
     }
   } finally {
     closedir(dirHandle);
   }
+}
+
+function direntReadField(entry, name) {
+  const [offset, type] = direntSpec[name];
+
+  const read = (typeof type === 'string') ? Memory['read' + type] : type;
+
+  const value = read(entry.add(offset));
+  if (value instanceof Int64 || value instanceof UInt64)
+    return value.valueOf();
+
+  return value;
 }
 
 function readFileSync(path, options = {}) {
@@ -522,8 +550,10 @@ const apiSpec = [
   ['lseek', NF, offsetType, ['int', offsetType, 'int']],
   ['read', SF, ssizeType, ['int', 'pointer', sizeType]],
   ['opendir', SF, 'pointer', ['pointer']],
+  ['opendir$INODE64', SF, 'pointer', ['pointer']],
   ['closedir', NF, 'int', ['pointer']],
   ['readdir', NF, 'pointer', ['pointer']],
+  ['readdir$INODE64', NF, 'pointer', ['pointer']],
   ['readlink', SF, ssizeType, ['pointer', 'pointer', sizeType]],
   ['stat', SF, 'int', ['pointer', 'pointer']],
   ['stat64', SF, 'int', ['pointer', 'pointer']],
