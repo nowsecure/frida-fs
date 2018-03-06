@@ -282,6 +282,17 @@ function readlinkSync(path) {
   return Memory.readUtf8String(buf, n);
 }
 
+function unlinkSync(path) {
+  const { unlink } = getApi();
+
+  const pathStr = Memory.allocUtf8String(path);
+
+  const result = unlink(pathStr);
+  const n = result.value.valueOf();
+  if (n === -1)
+    throw new Error(`Unable to unlink (${getErrorString(result.errno)})`);
+}
+
 const statFields = new Set([
   'dev',
   'mode',
@@ -530,6 +541,7 @@ const apiSpec = [
   ['lstat', SF, 'int', ['pointer', 'pointer']],
   ['lstat64', SF, 'int', ['pointer', 'pointer']],
   ['strerror', NF, 'pointer', ['int']],
+  ['unlink', SF, 'int', ['pointer']],
 ];
 
 let cachedApi = null;
@@ -582,4 +594,6 @@ module.exports = {
   statSync,
   lstat: callbackify(lstatSync),
   lstatSync,
+  unlink: callbackify(unlinkSync),
+  unlinkSync
 };
