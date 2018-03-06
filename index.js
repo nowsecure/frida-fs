@@ -283,13 +283,12 @@ function readlinkSync(path) {
 }
 
 function unlinkSync(path) {
-  const { unlink } = getApi();
+  const {unlink} = getApi();
 
   const pathStr = Memory.allocUtf8String(path);
 
   const result = unlink(pathStr);
-  const n = result.value.valueOf();
-  if (n === -1)
+  if (result.value === -1)
     throw new Error(`Unable to unlink (${getErrorString(result.errno)})`);
 }
 
@@ -536,12 +535,12 @@ const apiSpec = [
   ['closedir', NF, 'int', ['pointer']],
   ['readdir', NF, 'pointer', ['pointer']],
   ['readlink', SF, ssizeType, ['pointer', 'pointer', sizeType]],
+  ['unlink', SF, 'int', ['pointer']],
   ['stat', SF, 'int', ['pointer', 'pointer']],
   ['stat64', SF, 'int', ['pointer', 'pointer']],
   ['lstat', SF, 'int', ['pointer', 'pointer']],
   ['lstat64', SF, 'int', ['pointer', 'pointer']],
   ['strerror', NF, 'pointer', ['int']],
-  ['unlink', SF, 'int', ['pointer']],
 ];
 
 let cachedApi = null;
@@ -590,10 +589,10 @@ module.exports = {
   readFileSync,
   readlink: callbackify(readlinkSync),
   readlinkSync,
+  unlink: callbackify(unlinkSync),
+  unlinkSync,
   stat: callbackify(statSync),
   statSync,
   lstat: callbackify(lstatSync),
   lstatSync,
-  unlink: callbackify(unlinkSync),
-  unlinkSync,
 };
