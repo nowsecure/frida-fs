@@ -182,17 +182,25 @@ class WriteStream extends stream.Writable {
 }
 
 const direntSpecs = {
-  linux: {
+  'linux-32': {
+    'd_name': [11, 'Utf8String'],
+    'd_type': [10, 'U8']
+  },
+  'linux-64': {
     'd_name': [19, 'Utf8String'],
     'd_type': [18, 'U8']
   },
-  darwin: {
+  'darwin-32': {
+    'd_name': [21, 'Utf8String'],
+    'd_type': [20, 'U8']
+  },
+  'darwin-64': {
     'd_name': [21, 'Utf8String'],
     'd_type': [20, 'U8']
   }
 };
 
-const direntSpec = direntSpecs[platform];
+const direntSpec = direntSpecs[`${platform}-${pointerSize * 8}`];
 
 function readdirSync(path) {
   const entries = [];
