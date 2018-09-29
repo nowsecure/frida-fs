@@ -3,6 +3,9 @@
   "version": "2.0.1",
   "description": "Create a stream from a filesystem resource",
   "main": "index.js",
+  "files": [
+    "index.js"
+  ],
   "browserify": {
     "transform": [
       [
