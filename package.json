@@ -4,7 +4,7 @@
   "description": "Create a stream from a filesystem resource",
   "main": "index.js",
   "files": [
-    "index.js"
+    "/index.js"
   ],
   "browserify": {
     "transform": [
