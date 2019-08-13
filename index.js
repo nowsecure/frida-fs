@@ -1,5 +1,3 @@
-'use strict';
-
 const stream = require('stream');
 
 const {platform, pointerSize} = Process;
