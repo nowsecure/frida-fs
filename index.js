@@ -286,10 +286,10 @@ function readFileSync(path, options = {}) {
       throw new Error('Short read');
 
     if (encoding === 'utf8') {
-      return Memory.readUtf8String(buf, fileSize);
+      return buf.readUtf8String(fileSize);
     }
 
-    const value = Buffer.from(Memory.readByteArray(buf, fileSize));
+    const value = Buffer.from(buf.readByteArray(fileSize));
     if (encoding !== null) {
       return value.toString(encoding);
     }
@@ -313,7 +313,7 @@ function readlinkSync(path) {
   if (n === -1)
     throw new Error(`Unable to read link (${getErrorString(result.errno)})`);
 
-  return Memory.readUtf8String(buf, n);
+  return buf.readUtf8String(n);
 }
 
 function unlinkSync(path) {
@@ -517,22 +517,22 @@ function statsReadField(name) {
 }
 
 function readTimespec32(address) {
-  const sec = Memory.readU32(address);
-  const nsec = Memory.readU32(address.add(4));
+  const sec = address.readU32();
+  const nsec = address.add(4).readU32();
   const msec = nsec / 1000000;
   return new Date((sec * 1000) + msec);
 }
 
 function readTimespec64(address) {
   // FIXME: Improve UInt64 to support division
-  const sec = Memory.readU64(address).valueOf();
-  const nsec = Memory.readU64(address.add(8)).valueOf();
+  const sec = address.readU64().valueOf();
+  const nsec = address.add(8).readU64().valueOf();
   const msec = nsec / 1000000;
   return new Date((sec * 1000) + msec);
 }
 
 function getErrorString(errno) {
-  return Memory.readUtf8String(getApi().strerror(errno));
+  return getApi().strerror(errno).readUtf8String();
 }
 
 function callbackify(original) {
