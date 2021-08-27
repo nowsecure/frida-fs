@@ -669,4 +669,5 @@ module.exports = {
   statSync,
   lstat: callbackify(lstatSync),
   lstatSync,
+  Stats,
 };
