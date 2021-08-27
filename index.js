@@ -2,15 +2,24 @@ const stream = require('stream');
 
 const {platform, pointerSize} = Process;
 
+const S_IFMT = 0xf000;
+const S_IFREG = 0x8000;
+const S_IFDIR = 0x4000;
+const S_IFCHR = 0x2000;
+const S_IFBLK = 0x6000;
+const S_IFIFO = 0x1000;
+const S_IFLNK = 0xa000;
+const S_IFSOCK = 0xc000;
+
 const universalConstants = {
-  S_IFMT: 0xf000,
-  S_IFREG: 0x8000,
-  S_IFDIR: 0x4000,
-  S_IFCHR: 0x2000,
-  S_IFBLK: 0x6000,
-  S_IFIFO: 0x1000,
-  S_IFLNK: 0xa000,
-  S_IFSOCK: 0xc000,
+  S_IFMT,
+  S_IFREG,
+  S_IFDIR,
+  S_IFCHR,
+  S_IFBLK,
+  S_IFIFO,
+  S_IFLNK,
+  S_IFSOCK,
 
   S_IRWXU: 448,
   S_IRUSR: 256,
@@ -425,7 +434,34 @@ const statSpecs = {
 const statSpec = statSpecs[`${platform}-${pointerSize * 8}`] || null;
 const statBufSize = 256;
 
-function Stats() {
+class Stats {
+  isFile() {
+    return (this.mode & S_IFMT) === S_IFREG;
+  }
+
+  isDirectory() {
+    return (this.mode & S_IFMT) === S_IFDIR;
+  }
+
+  isCharacterDevice() {
+    return (this.mode & S_IFMT) === S_IFCHR;
+  }
+
+  isBlockDevice() {
+    return (this.mode & S_IFMT) === S_IFBLK;
+  }
+
+  isFIFO() {
+    return (this.mode & S_IFMT) === S_IFIFO;
+  }
+
+  isSymbolicLink() {
+    return (this.mode & S_IFMT) === S_IFLNK;
+  }
+
+  isSocket() {
+    return (this.mode & S_IFMT) === S_IFSOCK;
+  }
 }
 
 function statSync(path) {
@@ -466,6 +502,8 @@ function performStat(impl, path) {
         case 'buffer':
           return buf;
         default:
+          if (property in target)
+            return target[property];
           const value = statsReadField.call(receiver, property);
           return (value !== null) ? value : undefined;
       }
