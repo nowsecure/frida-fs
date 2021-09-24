@@ -1,4 +1,4 @@
-const stream = require('stream');
+import stream from 'stream';
 
 const {platform, pointerSize} = Process;
 
@@ -648,26 +648,49 @@ function addApiPlaceholder(api, entry) {
   });
 }
 
-module.exports = {
-  constants,
-  createReadStream(path) {
+export function createReadStream(path) {
     return new ReadStream(path);
-  },
-  createWriteStream(path) {
+}
+
+export function createWriteStream(path) {
     return new WriteStream(path);
-  },
-  readdir: callbackify(readdirSync),
+}
+
+export const readdir = callbackify(readdirSync);
+export const readFile = callbackify(readFileSync);
+export const readlink = callbackify(readlinkSync);
+export const unlink = callbackify(unlinkSync);
+export const stat = callbackify(statSync);
+export const lstat = callbackify(lstatSync);
+
+export {
+  constants,
   readdirSync,
   list,
-  readFile: callbackify(readFileSync),
   readFileSync,
-  readlink: callbackify(readlinkSync),
   readlinkSync,
-  unlink: callbackify(unlinkSync),
   unlinkSync,
-  stat: callbackify(statSync),
   statSync,
-  lstat: callbackify(lstatSync),
+  lstatSync,
+  Stats,
+};
+
+export default {
+  constants,
+  createReadStream,
+  createWriteStream,
+  readdir,
+  readdirSync,
+  list,
+  readFile,
+  readFileSync,
+  readlink,
+  readlinkSync,
+  unlink,
+  unlinkSync,
+  stat,
+  statSync,
+  lstat,
   lstatSync,
   Stats,
 };
