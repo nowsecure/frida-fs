@@ -17,5 +17,5 @@ fs.list("/proc/self/").forEach(elm => {
     console.log(JSON.stringify(elm))
 });
 
-console.log(fs.readFileSync("/etc/hosts"))
+console.log(fs.readFileSync("/etc/hosts"));
 ```
