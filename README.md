@@ -14,7 +14,7 @@ fs.createReadStream('/etc/hosts').pipe(networkStream);
 const fs = require('frida-fs');
 
 for (const elm of fs.list("/proc/self/")) {
-  console.log(JSON.stringify(elm))
+  console.log(JSON.stringify(elm));
 }
 
 console.log(fs.readFileSync("/etc/hosts"));
