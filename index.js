@@ -649,11 +649,11 @@ function addApiPlaceholder(api, entry) {
 }
 
 export function createReadStream(path) {
-    return new ReadStream(path);
+  return new ReadStream(path);
 }
 
 export function createWriteStream(path) {
-    return new WriteStream(path);
+  return new WriteStream(path);
 }
 
 export const readdir = callbackify(readdirSync);
