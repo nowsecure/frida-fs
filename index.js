@@ -466,13 +466,13 @@ class Stats {
 
 function statSync(path) {
   const api = getApi();
-  const impl = api.stat64 || api.stat;
+  const impl = api.stat64 ?? api.stat ?? api.__xstat64;
   return performStat(impl, path);
 }
 
 function lstatSync(path) {
   const api = getApi();
-  const impl = api.lstat64 || api.lstat;
+  const impl = api.lstat64 ?? api.lstat ?? api.__lxstat64;
   return performStat(impl, path);
 }
 
@@ -612,10 +612,17 @@ const apiSpec = [
   ['unlink', SF, 'int', ['pointer']],
   ['stat', SF, 'int', ['pointer', 'pointer']],
   ['stat64', SF, 'int', ['pointer', 'pointer']],
+  ['__xstat64', SF, 'int', ['int', 'pointer', 'pointer'], invokeXstat],
   ['lstat', SF, 'int', ['pointer', 'pointer']],
   ['lstat64', SF, 'int', ['pointer', 'pointer']],
+  ['__lxstat64', SF, 'int', ['int', 'pointer', 'pointer'], invokeXstat],
   ['strerror', NF, 'pointer', ['int']],
 ];
+
+function invokeXstat(impl, path, buf) {
+  const STAT_VER_LINUX = 3;
+  return impl(STAT_VER_LINUX, path, buf);
+}
 
 let cachedApi = null;
 function getApi() {
@@ -634,12 +641,15 @@ function addApiPlaceholder(api, entry) {
   Object.defineProperty(api, name, {
     configurable: true,
     get() {
-      const [, Ctor, retType, argTypes] = entry;
+      const [, Ctor, retType, argTypes, wrapper] = entry;
 
       let impl = null;
       const address = Module.findExportByName(null, name);
       if (address !== null)
         impl = new Ctor(address, retType, argTypes);
+
+      if (wrapper !== undefined)
+        impl = wrapper.bind(null, impl);
 
       Object.defineProperty(api, name, { value: impl });
 
