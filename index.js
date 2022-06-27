@@ -412,6 +412,24 @@ const statSpecs = {
       'blksize': [ 48, 'S32' ],
     }
   },
+  'linux-32-stat64': {
+    size: 104,
+    fields: {
+      'dev': [ 0, 'U64' ],
+      'mode': [ 16, 'U32' ],
+      'nlink': [ 20, 'U32' ],
+      'ino': [ 96, 'U64' ],
+      'uid': [ 24, 'U32' ],
+      'gid': [ 28, 'U32' ],
+      'rdev': [ 32, 'U64' ],
+      'atime': [ 72, readTimespec32 ],
+      'mtime': [ 80, readTimespec32 ],
+      'ctime': [ 88, readTimespec32 ],
+      'size': [ 48, 'S64' ],
+      'blocks': [ 64, 'S64' ],
+      'blksize': [ 56, 'S32' ],
+    }
+  },
   'linux-64': {
     size: 144,
     fields: {
@@ -431,8 +449,33 @@ const statSpecs = {
     },
   },
 };
-const statSpec = statSpecs[`${platform}-${pointerSize * 8}`] || null;
+let cachedStatSpec = null;
 const statBufSize = 256;
+
+function getStatSpec() {
+  if (cachedStatSpec !== null)
+    return cachedStatSpec;
+
+  const api = getApi();
+  const stat64Impl = api.stat64 ?? api.__xstat64;
+
+  let platformId = `${platform}-${pointerSize * 8}`;
+  if (platformId === 'linux-32') {
+    if (stat64Impl !== undefined)
+      platformId += '-stat64';
+  }
+
+  const statSpec = statSpecs[platformId];
+  if (statSpec === undefined)
+    throw new Error('Current OS is not yet supported; please open a PR');
+
+  statSpec._stat = stat64Impl ?? api.stat;
+  statSpec._lstat = api.lstat64 ?? api.__lxstat64 ?? api.lstat;
+
+  cachedStatSpec = statSpec;
+
+  return statSpec;
+}
 
 class Stats {
   isFile() {
@@ -465,21 +508,14 @@ class Stats {
 }
 
 function statSync(path) {
-  const api = getApi();
-  const impl = api.stat64 ?? api.stat ?? api.__xstat64;
-  return performStat(impl, path);
+  return performStat(getStatSpec()._stat, path);
 }
 
 function lstatSync(path) {
-  const api = getApi();
-  const impl = api.lstat64 ?? api.lstat ?? api.__lxstat64;
-  return performStat(impl, path);
+  return performStat(getStatSpec()._lstat, path);
 }
 
 function performStat(impl, path) {
-  if (statSpec === null)
-    throw new Error('Current OS is not yet supported; please open a PR');
-
   const buf = Memory.alloc(statBufSize);
   const result = impl(Memory.allocUtf8String(path), buf);
   if (result.value !== 0)
@@ -529,7 +565,7 @@ function statsHasField(name) {
 }
 
 function statsReadField(name) {
-  let field = statSpec.fields[name];
+  let field = getStatSpec().fields[name];
   if (field === undefined) {
     if (name === 'birthtime') {
       return statsReadField.call(this, 'ctime');
