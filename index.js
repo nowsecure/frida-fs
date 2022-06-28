@@ -1,3 +1,4 @@
+import {Buffer} from 'buffer';
 import stream from 'stream';
 
 const {platform, pointerSize} = Process;
