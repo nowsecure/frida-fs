@@ -1,6 +1,7 @@
 import {Buffer} from 'buffer';
 import process from 'process';
-import stream from 'stream';
+import {Readable} from 'readable-stream/lib/readable.js';
+import {Writable} from 'readable-stream/lib/writable.js';
 
 const {platform, pointerSize} = Process;
 
@@ -89,7 +90,7 @@ const SEEK_END = 2;
 
 const EINTR = 4;
 
-class ReadStream extends stream.Readable {
+class ReadStream extends Readable {
   constructor(path) {
     super({
       highWaterMark: 4 * 1024 * 1024
@@ -144,7 +145,7 @@ class ReadStream extends stream.Readable {
   }
 }
 
-class WriteStream extends stream.Writable {
+class WriteStream extends Writable {
   constructor(path) {
     super({
       highWaterMark: 4 * 1024 * 1024
