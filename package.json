@@ -15,8 +15,5 @@
   "bugs": {
     "url": "https://github.com/nowsecure/frida-fs/issues"
   },
-  "homepage": "https://github.com/nowsecure/frida-fs#readme",
-  "dependencies": {
-    "readable-stream": "^4.0.0"
-  }
+  "homepage": "https://github.com/nowsecure/frida-fs#readme"
 }
