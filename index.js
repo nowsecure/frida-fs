@@ -1,4 +1,5 @@
 import {Buffer} from 'buffer';
+import process from 'process';
 import stream from 'stream';
 
 const {platform, pointerSize} = Process;
@@ -100,8 +101,10 @@ class ReadStream extends stream.Readable {
     const pathStr = Memory.allocUtf8String(path);
     const fd = getApi().open(pathStr, constants.O_RDONLY, 0);
     if (fd.value === -1) {
-      this.emit('error', new Error(`Unable to open file (${getErrorString(fd.errno)})`));
-      this.push(null);
+      process.nextTick(() => {
+        this.emit('error', new Error(`Unable to open file (${getErrorString(fd.errno)})`));
+        this.push(null);
+      });
       return;
     }
 
@@ -155,8 +158,10 @@ class WriteStream extends stream.Writable {
     const mode = constants.S_IRUSR | constants.S_IWUSR | constants.S_IRGRP | constants.S_IROTH;
     const fd = getApi().open(pathStr, flags, mode);
     if (fd.value === -1) {
-      this.emit('error', new Error(`Unable to open file (${getErrorString(fd.errno)})`));
-      this.push(null);
+      process.nextTick(() => {
+        this.emit('error', new Error(`Unable to open file (${getErrorString(fd.errno)})`));
+        this.push(null);
+      });
       return;
     }
 
