@@ -127,6 +127,7 @@ class ReadStream extends stream.Readable {
     .catch(error => {
       this._readRequest = null;
       this._closeInput();
+      this.emit('error', error);
       this.push(null);
     });
   }
