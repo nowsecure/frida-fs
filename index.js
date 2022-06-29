@@ -3,6 +3,7 @@ import process from 'process';
 import stream from 'stream';
 
 const {platform, pointerSize} = Process;
+const isWindows = platform === 'windows';
 
 const S_IFMT = 0xf000;
 const S_IFREG = 0x8000;
@@ -102,7 +103,7 @@ class ReadStream extends stream.Readable {
     const fd = getApi().open(pathStr, constants.O_RDONLY, 0);
     if (fd.value === -1) {
       process.nextTick(() => {
-        this.destroy(new Error(getErrorString(fd.errno)));
+        this.destroy(new Error(getLibcErrorString(fd.errno)));
       });
       return;
     }
@@ -157,7 +158,7 @@ class WriteStream extends stream.Writable {
     const fd = getApi().open(pathStr, flags, mode);
     if (fd.value === -1) {
       process.nextTick(() => {
-        this.destroy(new Error(getErrorString(fd.errno)));
+        this.destroy(new Error(getLibcErrorString(fd.errno)));
       });
       return;
     }
@@ -193,6 +194,9 @@ class WriteStream extends stream.Writable {
 }
 
 const direntSpecs = {
+  'windows': {
+    'd_name': [44, 'Utf16String'],
+  },
   'linux-32': {
     'd_name': [11, 'Utf8String'],
     'd_type': [10, 'U8']
@@ -211,7 +215,8 @@ const direntSpecs = {
   }
 };
 
-const direntSpec = direntSpecs[`${platform}-${pointerSize * 8}`];
+const enumerateDirectoryEntries = isWindows ? enumerateDirectoryEntriesWindows : enumerateDirectoryEntriesUnix;
+const direntSpec = isWindows ? direntSpecs.windows : direntSpecs[`${platform}-${pointerSize * 8}`];
 
 function readdirSync(path) {
   const entries = [];
@@ -233,7 +238,27 @@ function list(path) {
   return entries;
 }
 
-function enumerateDirectoryEntries(path, callback) {
+function enumerateDirectoryEntriesWindows(path, callback) {
+  const {FindFirstFileW, FindNextFileW, FindClose} = getApi();
+  const INVALID_HANDLE_VALUE = ptr(-1);
+
+  const data = Memory.alloc(128 * 1024); // FIXME
+
+  const result = FindFirstFileW(Memory.allocUtf16String(path + '\\*'), data);
+  const handle = result.value;
+  if (handle.equals(INVALID_HANDLE_VALUE))
+    throwWindowsError(result.lastError);
+
+  try {
+    do {
+      callback(data);
+    } while (FindNextFileW(handle, data) !== 0);
+  } finally {
+    FindClose(handle);
+  }
+}
+
+function enumerateDirectoryEntriesUnix(path, callback) {
   const {opendir, opendir$INODE64, closedir, readdir, readdir$INODE64} = getApi();
 
   const opendirImpl = opendir$INODE64 || opendir;
@@ -242,7 +267,7 @@ function enumerateDirectoryEntries(path, callback) {
   const dir = opendirImpl(Memory.allocUtf8String(path));
   const dirHandle = dir.value;
   if (dirHandle.isNull())
-    throw new Error(getErrorString(dir.errno));
+    throwUnixError(dir.errno);
 
   try {
     let entry;
@@ -257,9 +282,9 @@ function enumerateDirectoryEntries(path, callback) {
 function readDirentField(entry, name) {
   const [offset, type] = direntSpec[name];
 
-  const read = (typeof type === 'string') ? Memory['read' + type] : type;
+  const read = (typeof type === 'string') ? NativePointer.prototype['read' + type] : type;
 
-  const value = read(entry.add(offset));
+  const value = read.call(entry.add(offset));
   if (value instanceof Int64 || value instanceof UInt64)
     return value.valueOf();
 
@@ -277,7 +302,7 @@ function readFileSync(path, options = {}) {
   const openResult = open(pathStr, constants.O_RDONLY, 0);
   const fd = openResult.value;
   if (fd === -1)
-    throw new Error(getErrorString(openResult.errno));
+    throwUnixError(openResult.errno);
 
   try {
     const fileSize = lseek(fd, 0, SEEK_END).valueOf();
@@ -293,7 +318,7 @@ function readFileSync(path, options = {}) {
     } while (readFailed && readResult.errno === EINTR);
 
     if (readFailed)
-      throw new Error(getErrorString(readResult.errno));
+      throwUnixError(readResult.errno);
 
     if (n !== fileSize.valueOf())
       throw new Error('Short read');
@@ -324,7 +349,7 @@ function readlinkSync(path) {
   const result = api.readlink(pathStr, buf, linkSize);
   const n = result.value.valueOf();
   if (n === -1)
-    throw new Error(getErrorString(result.errno));
+    throwUnixError(result.errno);
 
   return buf.readUtf8String(n);
 }
@@ -334,7 +359,7 @@ function rmdirSync(path) {
 
   const result = getApi().rmdir(pathStr);
   if (result.value === -1)
-    throw new Error(getErrorString(result.errno));
+    throwUnixError(result.errno);
 }
 
 function unlinkSync(path) {
@@ -342,7 +367,7 @@ function unlinkSync(path) {
 
   const result = getApi().unlink(pathStr);
   if (result.value === -1)
-    throw new Error(getErrorString(result.errno));
+    throwUnixError(result.errno);
 }
 
 const statFields = new Set([
@@ -366,6 +391,24 @@ const statFields = new Set([
   'birthtime',
 ]);
 const statSpecs = {
+  'windows': {
+    size: 36,
+    fields: {
+      'dev': [ 0, returnZero ],
+      'mode': [ 0, readWindowsFileAttributes ],
+      'nlink': [ 0, returnOne ],
+      'ino': [ 0, returnZero ],
+      'uid': [ 0, returnZero ],
+      'gid': [ 0, returnZero ],
+      'rdev': [ 0, returnZero ],
+      'atime': [ 12, readWindowsFileTime ],
+      'mtime': [ 20, readWindowsFileTime ],
+      'ctime': [ 4, readWindowsFileTime ],
+      'size': [ 28, readWindowsFileSize ],
+      'blocks': [ 28, readWindowsFileSize ],
+      'blksize': [ 0, returnOne ],
+    },
+  },
   'darwin-32': {
     size: 108,
     fields: {
@@ -466,21 +509,26 @@ function getStatSpec() {
   if (cachedStatSpec !== null)
     return cachedStatSpec;
 
-  const api = getApi();
-  const stat64Impl = api.stat64 ?? api.__xstat64;
+  let statSpec;
+  if (isWindows) {
+    statSpec = statSpecs.windows;
+  } else {
+    const api = getApi();
+    const stat64Impl = api.stat64 ?? api.__xstat64;
 
-  let platformId = `${platform}-${pointerSize * 8}`;
-  if (platformId === 'linux-32') {
-    if (stat64Impl !== undefined)
-      platformId += '-stat64';
+    let platformId = `${platform}-${pointerSize * 8}`;
+    if (platformId === 'linux-32') {
+      if (stat64Impl !== undefined)
+        platformId += '-stat64';
+    }
+
+    const statSpec = statSpecs[platformId];
+    if (statSpec === undefined)
+      throw new Error('Current OS is not yet supported; please open a PR');
+
+    statSpec._stat = stat64Impl ?? api.stat;
+    statSpec._lstat = api.lstat64 ?? api.__lxstat64 ?? api.lstat;
   }
-
-  const statSpec = statSpecs[platformId];
-  if (statSpec === undefined)
-    throw new Error('Current OS is not yet supported; please open a PR');
-
-  statSpec._stat = stat64Impl ?? api.stat;
-  statSpec._lstat = api.lstat64 ?? api.__lxstat64 ?? api.lstat;
 
   cachedStatSpec = statSpec;
 
@@ -518,19 +566,36 @@ class Stats {
 }
 
 function statSync(path) {
-  return performStat(getStatSpec()._stat, path);
+  if (isWindows)
+    return performStatWindows(path);
+  return performStatUnix(getStatSpec()._stat, path);
 }
 
 function lstatSync(path) {
-  return performStat(getStatSpec()._lstat, path);
+  if (isWindows)
+    return statSync(path);
+  return performStatUnix(getStatSpec()._lstat, path);
 }
 
-function performStat(impl, path) {
+function performStatWindows(path) {
+  const getFileExInfoStandard = 0;
+  const buf = Memory.alloc(36);
+  const result = getApi().GetFileAttributesExW(Memory.allocUtf16String(path), getFileExInfoStandard, buf);
+  console.log(`stat() path=\"${path}\" result=${JSON.stringify(result)}`);
+  if (result.value === 0)
+    throwWindowsError(result.lastError);
+  return makeStatsProxy(buf);
+}
+
+function performStatUnix(impl, path) {
   const buf = Memory.alloc(statBufSize);
   const result = impl(Memory.allocUtf8String(path), buf);
   if (result.value !== 0)
-    throw new Error(getErrorString(result.errno));
+    throwUnixError(result.errno);
+  return makeStatsProxy(buf);
+}
 
+function makeStatsProxy(buf) {
   return new Proxy(new Stats(), {
     has(target, property) {
       return statsHasField(property);
@@ -591,31 +656,81 @@ function statsReadField(name) {
 
   const [offset, type] = field;
 
-  const read = (typeof type === 'string') ? Memory['read' + type] : type;
+  const read = (typeof type === 'string') ? NativePointer.prototype['read' + type] : type;
 
-  const value = read(this.buffer.add(offset));
+  const value = read.call(this.buffer.add(offset));
   if (value instanceof Int64 || value instanceof UInt64)
     return value.valueOf();
 
   return value;
 }
 
-function readTimespec32(address) {
-  const sec = address.readU32();
-  const nsec = address.add(4).readU32();
+function readWindowsFileAttributes() {
+  const FILE_ATTRIBUTE_DIRECTORY = 0x10;
+
+  let mode;
+  if ((this.readU32() & FILE_ATTRIBUTE_DIRECTORY) !== 0)
+    mode = S_IFDIR | 0x1ed;
+  else
+    mode |= S_IFREG | 0x1a4;
+
+  return mode;
+}
+
+function readWindowsFileTime() {
+  const fileTime = BigInt(this.readU64().toString()).valueOf();
+  const hundredNsecInMsec = 10000n;
+  const msecToUnixEpoch = 11644473600000n;
+  const unixTime = (fileTime / hundredNsecInMsec) + msecToUnixEpoch;
+  return new Date(parseInt(unixTime));
+}
+
+function readWindowsFileSize() {
+  const high = this.readU32();
+  const low = this.add(4).readU32();
+  return uint64(high).shl(32).or(low);
+}
+
+function readTimespec32() {
+  const sec = this.readU32();
+  const nsec = this.add(4).readU32();
   const msec = nsec / 1000000;
   return new Date((sec * 1000) + msec);
 }
 
-function readTimespec64(address) {
+function readTimespec64() {
   // FIXME: Improve UInt64 to support division
-  const sec = address.readU64().valueOf();
-  const nsec = address.add(8).readU64().valueOf();
+  const sec = this.readU64().valueOf();
+  const nsec = this.add(8).readU64().valueOf();
   const msec = nsec / 1000000;
   return new Date((sec * 1000) + msec);
 }
 
-function getErrorString(errno) {
+function returnZero() {
+  return 0;
+}
+
+function returnOne() {
+  return 1;
+}
+
+function throwWindowsError(lastError) {
+  throw makeWindowsError(lastError);
+}
+
+function throwUnixError(errno) {
+  throw makeUnixError(errno);
+}
+
+function makeWindowsError(lastError) {
+  return new Error('Something went wrong: LastError=' + lastError);
+}
+
+function makeUnixError(errno) {
+  return new Error(getLibcErrorString(errno));
+}
+
+function getLibcErrorString(errno) {
   return getApi().strerror(errno).readUtf8String();
 }
 
@@ -640,31 +755,43 @@ function callbackify(original) {
 const SF = SystemFunction;
 const NF = NativeFunction;
 
+const nativeOpts = (isWindows && pointerSize === 4) ? { abi: 'stdcall' } : {};
+
 const ssizeType = (pointerSize === 8) ? 'int64' : 'int32';
 const sizeType = 'u' + ssizeType;
 const offsetType = (platform === 'darwin' || pointerSize === 8) ? 'int64' : 'int32';
 
-const apiSpec = [
-  ['open', SF, 'int', ['pointer', 'int', '...', 'int']],
-  ['close', NF, 'int', ['int']],
-  ['lseek', NF, offsetType, ['int', offsetType, 'int']],
-  ['read', SF, ssizeType, ['int', 'pointer', sizeType]],
-  ['opendir', SF, 'pointer', ['pointer']],
-  ['opendir$INODE64', SF, 'pointer', ['pointer']],
-  ['closedir', NF, 'int', ['pointer']],
-  ['readdir', NF, 'pointer', ['pointer']],
-  ['readdir$INODE64', NF, 'pointer', ['pointer']],
-  ['readlink', SF, ssizeType, ['pointer', 'pointer', sizeType]],
-  ['rmdir', SF, 'int', ['pointer']],
-  ['unlink', SF, 'int', ['pointer']],
-  ['stat', SF, 'int', ['pointer', 'pointer']],
-  ['stat64', SF, 'int', ['pointer', 'pointer']],
-  ['__xstat64', SF, 'int', ['int', 'pointer', 'pointer'], invokeXstat],
-  ['lstat', SF, 'int', ['pointer', 'pointer']],
-  ['lstat64', SF, 'int', ['pointer', 'pointer']],
-  ['__lxstat64', SF, 'int', ['int', 'pointer', 'pointer'], invokeXstat],
-  ['strerror', NF, 'pointer', ['int']],
-];
+let apiSpec;
+if (isWindows) {
+  apiSpec = [
+    ['FindFirstFileW', SF, 'pointer', ['pointer', 'pointer']],
+    ['FindNextFileW', NF, 'uint', ['pointer', 'pointer']],
+    ['FindClose', NF, 'uint', ['pointer']],
+    ['GetFileAttributesExW', SF, 'uint', ['pointer', 'uint', 'pointer']],
+  ];
+} else {
+  apiSpec = [
+    ['open', SF, 'int', ['pointer', 'int', '...', 'int']],
+    ['close', NF, 'int', ['int']],
+    ['lseek', NF, offsetType, ['int', offsetType, 'int']],
+    ['read', SF, ssizeType, ['int', 'pointer', sizeType]],
+    ['opendir', SF, 'pointer', ['pointer']],
+    ['opendir$INODE64', SF, 'pointer', ['pointer']],
+    ['closedir', NF, 'int', ['pointer']],
+    ['readdir', NF, 'pointer', ['pointer']],
+    ['readdir$INODE64', NF, 'pointer', ['pointer']],
+    ['readlink', SF, ssizeType, ['pointer', 'pointer', sizeType]],
+    ['rmdir', SF, 'int', ['pointer']],
+    ['unlink', SF, 'int', ['pointer']],
+    ['stat', SF, 'int', ['pointer', 'pointer']],
+    ['stat64', SF, 'int', ['pointer', 'pointer']],
+    ['__xstat64', SF, 'int', ['int', 'pointer', 'pointer'], invokeXstat],
+    ['lstat', SF, 'int', ['pointer', 'pointer']],
+    ['lstat64', SF, 'int', ['pointer', 'pointer']],
+    ['__lxstat64', SF, 'int', ['int', 'pointer', 'pointer'], invokeXstat],
+    ['strerror', NF, 'pointer', ['int']],
+  ];
+}
 
 function invokeXstat(impl, path, buf) {
   const STAT_VER_LINUX = 3;
@@ -691,9 +818,11 @@ function addApiPlaceholder(api, entry) {
       const [, Ctor, retType, argTypes, wrapper] = entry;
 
       let impl = null;
-      const address = Module.findExportByName(null, name);
+      const address = isWindows
+          ? Module.findExportByName('kernel32.dll', name)
+          : Module.findExportByName(null, name);
       if (address !== null)
-        impl = new Ctor(address, retType, argTypes);
+        impl = new Ctor(address, retType, argTypes, nativeOpts);
 
       if (wrapper !== undefined)
         impl = wrapper.bind(null, impl);
