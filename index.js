@@ -242,7 +242,7 @@ function enumerateDirectoryEntries(path, callback) {
   const dir = opendirImpl(Memory.allocUtf8String(path));
   const dirHandle = dir.value;
   if (dirHandle.isNull())
-    throw new Error(`Unable to open directory (${getErrorString(dir.errno)})`);
+    throw new Error(getErrorString(dir.errno));
 
   try {
     let entry;
@@ -277,7 +277,7 @@ function readFileSync(path, options = {}) {
   const openResult = open(pathStr, constants.O_RDONLY, 0);
   const fd = openResult.value;
   if (fd === -1)
-    throw new Error(`Unable to open file (${getErrorString(openResult.errno)})`);
+    throw new Error(getErrorString(openResult.errno));
 
   try {
     const fileSize = lseek(fd, 0, SEEK_END).valueOf();
@@ -293,7 +293,7 @@ function readFileSync(path, options = {}) {
     } while (readFailed && readResult.errno === EINTR);
 
     if (readFailed)
-      throw new Error(`Unable to read ${path} (${getErrorString(readResult.errno)})`);
+      throw new Error(getErrorString(readResult.errno));
 
     if (n !== fileSize.valueOf())
       throw new Error('Short read');
@@ -324,7 +324,7 @@ function readlinkSync(path) {
   const result = api.readlink(pathStr, buf, linkSize);
   const n = result.value.valueOf();
   if (n === -1)
-    throw new Error(`Unable to read link (${getErrorString(result.errno)})`);
+    throw new Error(getErrorString(result.errno));
 
   return buf.readUtf8String(n);
 }
@@ -336,7 +336,7 @@ function unlinkSync(path) {
 
   const result = unlink(pathStr);
   if (result.value === -1)
-    throw new Error(`Unable to unlink (${getErrorString(result.errno)})`);
+    throw new Error(getErrorString(result.errno));
 }
 
 const statFields = new Set([
@@ -523,7 +523,7 @@ function performStat(impl, path) {
   const buf = Memory.alloc(statBufSize);
   const result = impl(Memory.allocUtf8String(path), buf);
   if (result.value !== 0)
-    throw new Error(`Unable to stat ${path} (${getErrorString(result.errno)})`);
+    throw new Error(getErrorString(result.errno));
 
   return new Proxy(new Stats(), {
     has(target, property) {
