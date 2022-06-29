@@ -102,13 +102,21 @@ class ReadStream extends stream.Readable {
     const fd = getApi().open(pathStr, constants.O_RDONLY, 0);
     if (fd.value === -1) {
       process.nextTick(() => {
-        this.emit('error', new Error(`Unable to open file (${getErrorString(fd.errno)})`));
-        this.push(null);
+        this.destroy(new Error(getErrorString(fd.errno)));
       });
       return;
     }
 
     this._input = new UnixInputStream(fd.value, { autoClose: true });
+  }
+
+  _destroy(err, callback) {
+    if (this._input !== null) {
+      this._input.close();
+      this._input = null;
+    }
+
+    callback(err);
   }
 
   _read(size) {
@@ -120,7 +128,6 @@ class ReadStream extends stream.Readable {
       this._readRequest = null;
 
       if (buffer.byteLength === 0) {
-        this._closeInput();
         this.push(null);
         return;
       }
@@ -130,17 +137,8 @@ class ReadStream extends stream.Readable {
     })
     .catch(error => {
       this._readRequest = null;
-      this._closeInput();
-      this.emit('error', error);
-      this.push(null);
+      this.destroy(error);
     });
-  }
-
-  _closeInput() {
-    if (this._input !== null) {
-      this._input.close();
-      this._input = null;
-    }
   }
 }
 
@@ -159,15 +157,21 @@ class WriteStream extends stream.Writable {
     const fd = getApi().open(pathStr, flags, mode);
     if (fd.value === -1) {
       process.nextTick(() => {
-        this.emit('error', new Error(`Unable to open file (${getErrorString(fd.errno)})`));
-        this.push(null);
+        this.destroy(new Error(getErrorString(fd.errno)));
       });
       return;
     }
 
     this._output = new UnixOutputStream(fd.value, { autoClose: true });
-    this.on('finish', () => this._closeOutput());
-    this.on('error', () => this._closeOutput());
+  }
+
+  _destroy(err, callback) {
+    if (this._output !== null) {
+      this._output.close();
+      this._output = null;
+    }
+
+    callback(err);
   }
 
   _write(chunk, encoding, callback) {
@@ -185,13 +189,6 @@ class WriteStream extends stream.Writable {
 
       callback(error);
     });
-  }
-
-  _closeOutput() {
-    if (this._output !== null) {
-      this._output.close();
-      this._output = null;
-    }
   }
 }
 
