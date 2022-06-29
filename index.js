@@ -723,7 +723,17 @@ function throwUnixError(errno) {
 }
 
 function makeWindowsError(lastError) {
-  return new Error('Something went wrong: LastError=' + lastError);
+  const maxLength = 256;
+
+  const FORMAT_MESSAGE_FROM_SYSTEM = 0x00001000;
+  const FORMAT_MESSAGE_IGNORE_INSERTS = 0x00000200;
+
+  const buf = Memory.alloc(maxLength * 2);
+  getApi().FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+      NULL, lastError, 0 /* MAKELANGID (LANG_NEUTRAL, SUBLANG_DEFAULT) */,
+      buf, maxLength, NULL);
+
+  return new Error(buf.readUtf16String());
 }
 
 function makeUnixError(errno) {
@@ -768,6 +778,7 @@ if (isWindows) {
     ['FindNextFileW', NF, 'uint', ['pointer', 'pointer']],
     ['FindClose', NF, 'uint', ['pointer']],
     ['GetFileAttributesExW', SF, 'uint', ['pointer', 'uint', 'pointer']],
+    ['FormatMessageW', NF, 'uint', ['uint', 'pointer', 'uint', 'uint', 'pointer', 'uint', 'pointer']],
   ];
 } else {
   apiSpec = [
