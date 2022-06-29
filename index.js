@@ -329,12 +329,11 @@ function readlinkSync(path) {
   return buf.readUtf8String(n);
 }
 
-function unlinkSync(path) {
-  const {unlink} = getApi();
 
+function unlinkSync(path) {
   const pathStr = Memory.allocUtf8String(path);
 
-  const result = unlink(pathStr);
+  const result = getApi().unlink(pathStr);
   if (result.value === -1)
     throw new Error(getErrorString(result.errno));
 }
