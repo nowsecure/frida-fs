@@ -329,6 +329,13 @@ function readlinkSync(path) {
   return buf.readUtf8String(n);
 }
 
+function rmdirSync(path) {
+  const pathStr = Memory.allocUtf8String(path);
+
+  const result = getApi().rmdir(pathStr);
+  if (result.value === -1)
+    throw new Error(getErrorString(result.errno));
+}
 
 function unlinkSync(path) {
   const pathStr = Memory.allocUtf8String(path);
@@ -648,6 +655,7 @@ const apiSpec = [
   ['readdir', NF, 'pointer', ['pointer']],
   ['readdir$INODE64', NF, 'pointer', ['pointer']],
   ['readlink', SF, ssizeType, ['pointer', 'pointer', sizeType]],
+  ['rmdir', SF, 'int', ['pointer']],
   ['unlink', SF, 'int', ['pointer']],
   ['stat', SF, 'int', ['pointer', 'pointer']],
   ['stat64', SF, 'int', ['pointer', 'pointer']],
@@ -708,6 +716,7 @@ export function createWriteStream(path) {
 export const readdir = callbackify(readdirSync);
 export const readFile = callbackify(readFileSync);
 export const readlink = callbackify(readlinkSync);
+export const rmdir = callbackify(rmdirSync);
 export const unlink = callbackify(unlinkSync);
 export const stat = callbackify(statSync);
 export const lstat = callbackify(lstatSync);
@@ -718,6 +727,7 @@ export {
   list,
   readFileSync,
   readlinkSync,
+  rmdirSync,
   unlinkSync,
   statSync,
   lstatSync,
@@ -735,6 +745,8 @@ export default {
   readFileSync,
   readlink,
   readlinkSync,
+  rmdir,
+  rmdirSync,
   unlink,
   unlinkSync,
   stat,
