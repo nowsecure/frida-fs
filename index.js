@@ -285,6 +285,19 @@ const windowsBackend = {
     if (result.value === 0)
       throwWindowsError(result.lastError);
   },
+
+  statSync(path) {
+    return windowsBackend.lstatSync(path);
+  },
+
+  lstatSync(path) {
+    const getFileExInfoStandard = 0;
+    const buf = Memory.alloc(36);
+    const result = getApi().GetFileAttributesExW(Memory.allocUtf16String(path), getFileExInfoStandard, buf);
+    if (result.value === 0)
+      throwWindowsError(result.lastError);
+    return makeStatsProxy(buf);
+  },
 };
 
 const posixBackend = {
@@ -360,7 +373,7 @@ const posixBackend = {
 
     const pathStr = Memory.allocUtf8String(path);
 
-    const linkSize = lstatSync(path).size.valueOf();
+    const linkSize = posixBackend.lstatSync(path).size.valueOf();
     const buf = Memory.alloc(linkSize);
 
     const result = api.readlink(pathStr, buf, linkSize);
@@ -382,7 +395,23 @@ const posixBackend = {
     if (result.value === -1)
       throwPosixError(result.errno);
   },
+
+  statSync(path) {
+    return performStatPosix(getStatSpec()._stat, path);
+  },
+
+  lstatSync(path) {
+    return performStatPosix(getStatSpec()._lstat, path);
+  },
 };
+
+function performStatPosix(impl, path) {
+  const buf = Memory.alloc(statBufSize);
+  const result = impl(Memory.allocUtf8String(path), buf);
+  if (result.value !== 0)
+    throwPosixError(result.errno);
+  return makeStatsProxy(buf);
+}
 
 const backend = isWindows ? windowsBackend : posixBackend;
 
@@ -392,6 +421,8 @@ const {
   readlinkSync,
   rmdirSync,
   unlinkSync,
+  statSync,
+  lstatSync,
 } = backend;
 
 function readdirSync(path) {
@@ -643,35 +674,6 @@ class Stats {
   isSocket() {
     return (this.mode & S_IFMT) === S_IFSOCK;
   }
-}
-
-function statSync(path) {
-  if (isWindows)
-    return performStatWindows(path);
-  return performStatPosix(getStatSpec()._stat, path);
-}
-
-function lstatSync(path) {
-  if (isWindows)
-    return statSync(path);
-  return performStatPosix(getStatSpec()._lstat, path);
-}
-
-function performStatWindows(path) {
-  const getFileExInfoStandard = 0;
-  const buf = Memory.alloc(36);
-  const result = getApi().GetFileAttributesExW(Memory.allocUtf16String(path), getFileExInfoStandard, buf);
-  if (result.value === 0)
-    throwWindowsError(result.lastError);
-  return makeStatsProxy(buf);
-}
-
-function performStatPosix(impl, path) {
-  const buf = Memory.alloc(statBufSize);
-  const result = impl(Memory.allocUtf8String(path), buf);
-  if (result.value !== 0)
-    throwPosixError(result.errno);
-  return makeStatsProxy(buf);
 }
 
 function makeStatsProxy(buf) {
