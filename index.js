@@ -134,7 +134,7 @@ class ReadStream extends stream.Readable {
       const fd = result.value;
       if (fd === -1) {
         process.nextTick(() => {
-          this.destroy(makeUnixError(result.errno));
+          this.destroy(makePosixError(result.errno));
         });
         return;
       }
@@ -218,7 +218,7 @@ class WriteStream extends stream.Writable {
       const fd = result.value;
       if (fd === -1) {
         process.nextTick(() => {
-          this.destroy(makeUnixError(result.errno));
+          this.destroy(makePosixError(result.errno));
         });
         return;
       }
@@ -254,6 +254,166 @@ class WriteStream extends stream.Writable {
   }
 }
 
+const windowsBackend = {
+  enumerateDirectoryEntries(path, callback) {
+    const {FindFirstFileW, FindNextFileW, FindClose} = getApi();
+
+    const data = Memory.alloc(592);
+
+    const result = FindFirstFileW(Memory.allocUtf16String(path + '\\*'), data);
+    const handle = result.value;
+    if (handle.equals(INVALID_HANDLE_VALUE))
+      throwWindowsError(result.lastError);
+
+    try {
+      do {
+        callback(data);
+      } while (FindNextFileW(handle, data) !== 0);
+    } finally {
+      FindClose(handle);
+    }
+  },
+
+  rmdirSync(path) {
+    const result = getApi().RemoveDirectoryW(Memory.allocUtf16String(path));
+    if (result.value === 0)
+      throwWindowsError(result.lastError);
+  },
+
+  unlinkSync(path) {
+    const result = getApi().DeleteFileW(Memory.allocUtf16String(path));
+    if (result.value === 0)
+      throwWindowsError(result.lastError);
+  },
+};
+
+const posixBackend = {
+  enumerateDirectoryEntries(path, callback) {
+    const {opendir, opendir$INODE64, closedir, readdir, readdir$INODE64} = getApi();
+
+    const opendirImpl = opendir$INODE64 || opendir;
+    const readdirImpl = readdir$INODE64 || readdir;
+
+    const dir = opendirImpl(Memory.allocUtf8String(path));
+    const dirHandle = dir.value;
+    if (dirHandle.isNull())
+      throwPosixError(dir.errno);
+
+    try {
+      let entry;
+      while (!((entry = readdirImpl(dirHandle)).isNull())) {
+        callback(entry);
+      }
+    } finally {
+      closedir(dirHandle);
+    }
+  },
+
+  readFileSync(path, options = {}) {
+    if (typeof options === 'string')
+      options = { encoding: options };
+    const {encoding = null} = options;
+
+    const {open, close, lseek, read} = getApi();
+
+    const openResult = open(Memory.allocUtf8String(path), constants.O_RDONLY, 0);
+    const fd = openResult.value;
+    if (fd === -1)
+      throwPosixError(openResult.errno);
+
+    try {
+      const fileSize = lseek(fd, 0, SEEK_END).valueOf();
+
+      lseek(fd, 0, SEEK_SET);
+
+      const buf = Memory.alloc(fileSize);
+      let readResult, n, readFailed;
+      do {
+        readResult = read(fd, buf, fileSize);
+        n = readResult.value.valueOf();
+        readFailed = n === -1;
+      } while (readFailed && readResult.errno === EINTR);
+
+      if (readFailed)
+        throwPosixError(readResult.errno);
+
+      if (n !== fileSize.valueOf())
+        throw new Error('Short read');
+
+      if (encoding === 'utf8') {
+        return buf.readUtf8String(fileSize);
+      }
+
+      const value = Buffer.from(buf.readByteArray(fileSize));
+      if (encoding !== null) {
+        return value.toString(encoding);
+      }
+
+      return value;
+    } finally {
+      close(fd);
+    }
+  },
+
+  readlinkSync(path) {
+    const api = getApi();
+
+    const pathStr = Memory.allocUtf8String(path);
+
+    const linkSize = lstatSync(path).size.valueOf();
+    const buf = Memory.alloc(linkSize);
+
+    const result = api.readlink(pathStr, buf, linkSize);
+    const n = result.value.valueOf();
+    if (n === -1)
+      throwPosixError(result.errno);
+
+    return buf.readUtf8String(n);
+  },
+
+  rmdirSync(path) {
+    const result = getApi().rmdir(Memory.allocUtf8String(path));
+    if (result.value === -1)
+      throwPosixError(result.errno);
+  },
+
+  unlinkSync(path) {
+    const result = getApi().unlink(Memory.allocUtf8String(path));
+    if (result.value === -1)
+      throwPosixError(result.errno);
+  },
+};
+
+const backend = isWindows ? windowsBackend : posixBackend;
+
+const {
+  enumerateDirectoryEntries,
+  readFileSync,
+  readlinkSync,
+  rmdirSync,
+  unlinkSync,
+} = backend;
+
+function readdirSync(path) {
+  const entries = [];
+  enumerateDirectoryEntries(path, entry => {
+    const name = readDirentField(entry, 'd_name');
+    entries.push(name);
+  });
+  return entries;
+}
+
+function list(path) {
+  const entries = [];
+  enumerateDirectoryEntries(path, entry => {
+    entries.push({
+      name: readDirentField(entry, 'd_name'),
+      type: readDirentField(entry, 'd_type')
+    });
+  });
+  return entries;
+}
+
 const direntSpecs = {
   'windows': {
     'd_name': [44, 'Utf16String'],
@@ -276,68 +436,7 @@ const direntSpecs = {
   }
 };
 
-const enumerateDirectoryEntries = isWindows ? enumerateDirectoryEntriesWindows : enumerateDirectoryEntriesUnix;
 const direntSpec = isWindows ? direntSpecs.windows : direntSpecs[`${platform}-${pointerSize * 8}`];
-
-function readdirSync(path) {
-  const entries = [];
-  enumerateDirectoryEntries(path, entry => {
-    const name = readDirentField(entry, 'd_name');
-    entries.push(name);
-  });
-  return entries;
-}
-
-function list(path) {
-  const entries = [];
-  enumerateDirectoryEntries(path, entry => {
-    entries.push({
-      name: readDirentField(entry, 'd_name'),
-      type: readDirentField(entry, 'd_type')
-    });
-  });
-  return entries;
-}
-
-function enumerateDirectoryEntriesWindows(path, callback) {
-  const {FindFirstFileW, FindNextFileW, FindClose} = getApi();
-
-  const data = Memory.alloc(592);
-
-  const result = FindFirstFileW(Memory.allocUtf16String(path + '\\*'), data);
-  const handle = result.value;
-  if (handle.equals(INVALID_HANDLE_VALUE))
-    throwWindowsError(result.lastError);
-
-  try {
-    do {
-      callback(data);
-    } while (FindNextFileW(handle, data) !== 0);
-  } finally {
-    FindClose(handle);
-  }
-}
-
-function enumerateDirectoryEntriesUnix(path, callback) {
-  const {opendir, opendir$INODE64, closedir, readdir, readdir$INODE64} = getApi();
-
-  const opendirImpl = opendir$INODE64 || opendir;
-  const readdirImpl = readdir$INODE64 || readdir;
-
-  const dir = opendirImpl(Memory.allocUtf8String(path));
-  const dirHandle = dir.value;
-  if (dirHandle.isNull())
-    throwUnixError(dir.errno);
-
-  try {
-    let entry;
-    while (!((entry = readdirImpl(dirHandle)).isNull())) {
-      callback(entry);
-    }
-  } finally {
-    closedir(dirHandle);
-  }
-}
 
 function readDirentField(entry, name) {
   const [offset, type] = direntSpec[name];
@@ -349,85 +448,6 @@ function readDirentField(entry, name) {
     return value.valueOf();
 
   return value;
-}
-
-function readFileSync(path, options = {}) {
-  if (typeof options === 'string')
-    options = { encoding: options };
-  const {encoding = null} = options;
-
-  const {open, close, lseek, read} = getApi();
-
-  const pathStr = Memory.allocUtf8String(path);
-  const openResult = open(pathStr, constants.O_RDONLY, 0);
-  const fd = openResult.value;
-  if (fd === -1)
-    throwUnixError(openResult.errno);
-
-  try {
-    const fileSize = lseek(fd, 0, SEEK_END).valueOf();
-
-    lseek(fd, 0, SEEK_SET);
-
-    const buf = Memory.alloc(fileSize);
-    let readResult, n, readFailed;
-    do {
-      readResult = read(fd, buf, fileSize);
-      n = readResult.value.valueOf();
-      readFailed = n === -1;
-    } while (readFailed && readResult.errno === EINTR);
-
-    if (readFailed)
-      throwUnixError(readResult.errno);
-
-    if (n !== fileSize.valueOf())
-      throw new Error('Short read');
-
-    if (encoding === 'utf8') {
-      return buf.readUtf8String(fileSize);
-    }
-
-    const value = Buffer.from(buf.readByteArray(fileSize));
-    if (encoding !== null) {
-      return value.toString(encoding);
-    }
-
-    return value;
-  } finally {
-    close(fd);
-  }
-}
-
-function readlinkSync(path) {
-  const api = getApi();
-
-  const pathStr = Memory.allocUtf8String(path);
-
-  const linkSize = lstatSync(path).size.valueOf();
-  const buf = Memory.alloc(linkSize);
-
-  const result = api.readlink(pathStr, buf, linkSize);
-  const n = result.value.valueOf();
-  if (n === -1)
-    throwUnixError(result.errno);
-
-  return buf.readUtf8String(n);
-}
-
-function rmdirSync(path) {
-  const pathStr = Memory.allocUtf8String(path);
-
-  const result = getApi().rmdir(pathStr);
-  if (result.value === -1)
-    throwUnixError(result.errno);
-}
-
-function unlinkSync(path) {
-  const pathStr = Memory.allocUtf8String(path);
-
-  const result = getApi().unlink(pathStr);
-  if (result.value === -1)
-    throwUnixError(result.errno);
 }
 
 const statFields = new Set([
@@ -628,13 +648,13 @@ class Stats {
 function statSync(path) {
   if (isWindows)
     return performStatWindows(path);
-  return performStatUnix(getStatSpec()._stat, path);
+  return performStatPosix(getStatSpec()._stat, path);
 }
 
 function lstatSync(path) {
   if (isWindows)
     return statSync(path);
-  return performStatUnix(getStatSpec()._lstat, path);
+  return performStatPosix(getStatSpec()._lstat, path);
 }
 
 function performStatWindows(path) {
@@ -646,11 +666,11 @@ function performStatWindows(path) {
   return makeStatsProxy(buf);
 }
 
-function performStatUnix(impl, path) {
+function performStatPosix(impl, path) {
   const buf = Memory.alloc(statBufSize);
   const result = impl(Memory.allocUtf8String(path), buf);
   if (result.value !== 0)
-    throwUnixError(result.errno);
+    throwPosixError(result.errno);
   return makeStatsProxy(buf);
 }
 
@@ -777,8 +797,8 @@ function throwWindowsError(lastError) {
   throw makeWindowsError(lastError);
 }
 
-function throwUnixError(errno) {
-  throw makeUnixError(errno);
+function throwPosixError(errno) {
+  throw makePosixError(errno);
 }
 
 function makeWindowsError(lastError) {
@@ -794,7 +814,7 @@ function makeWindowsError(lastError) {
   return new Error(buf.readUtf16String());
 }
 
-function makeUnixError(errno) {
+function makePosixError(errno) {
   const message = getApi().strerror(errno).readUtf8String();
   return new Error(message);
 }
@@ -830,6 +850,8 @@ let apiSpec;
 if (isWindows) {
   apiSpec = [
     ['CreateFileW', SF, 'pointer', ['pointer', 'uint', 'uint', 'pointer', 'uint', 'uint', 'pointer']],
+    ['DeleteFileW', SF, 'uint', ['pointer']],
+    ['RemoveDirectoryW', SF, 'uint', ['pointer']],
     ['FindFirstFileW', SF, 'pointer', ['pointer', 'pointer']],
     ['FindNextFileW', NF, 'uint', ['pointer', 'pointer']],
     ['FindClose', NF, 'uint', ['pointer']],
