@@ -274,7 +274,48 @@ const windowsBackend = {
   },
 
   readFileSync(path, options = {}) {
-    throw new Error('Not yet implemented');
+    if (typeof options === 'string')
+      options = { encoding: options };
+    const {encoding = null} = options;
+
+    const {CreateFileW, GetFileSizeEx, ReadFile, CloseHandle} = getApi();
+
+    const createRes = CreateFileW(
+        Memory.allocUtf16String(path),
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        NULL,
+        OPEN_EXISTING,
+        0,
+        NULL);
+    const handle = createRes.value;
+    if (handle.equals(INVALID_HANDLE_VALUE))
+      throwWindowsError(createRes.lastError);
+
+    try {
+      const scratchBuf = Memory.alloc(8);
+
+      const fileSizeBuf = scratchBuf;
+      const getRes = GetFileSizeEx(handle, fileSizeBuf);
+      if (getRes.value === 0)
+          throwWindowsError(getRes.lastError);
+      const fileSize = fileSizeBuf.readU64().valueOf();
+
+      const buf = Memory.alloc(fileSize);
+
+      const numBytesReadBuf = scratchBuf;
+      const readRes = ReadFile(handle, buf, fileSize, numBytesReadBuf, NULL);
+      if (readRes.value === 0)
+        throwWindowsError(readRes.lastError);
+      const n = numBytesReadBuf.readU32();
+
+      if (n !== fileSize)
+        throw new Error('Short read');
+
+      return parseReadFileResult(buf, fileSize, encoding);
+    } finally {
+      CloseHandle(handle);
+    }
   },
 
   readlinkSync(path) {
@@ -288,7 +329,6 @@ const windowsBackend = {
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS,
         NULL);
-
     const handle = createRes.value;
     if (handle.equals(INVALID_HANDLE_VALUE))
       throwWindowsError(createRes.lastError);
@@ -425,16 +465,7 @@ const posixBackend = {
       if (n !== fileSize.valueOf())
         throw new Error('Short read');
 
-      if (encoding === 'utf8') {
-        return buf.readUtf8String(fileSize);
-      }
-
-      const value = Buffer.from(buf.readByteArray(fileSize));
-      if (encoding !== null) {
-        return value.toString(encoding);
-      }
-
-      return value;
+      return parseReadFileResult(buf, fileSize, encoding);
     } finally {
       close(fd);
     }
@@ -483,6 +514,17 @@ function performStatPosix(impl, path) {
   if (result.value !== 0)
     throwPosixError(result.errno);
   return makeStatsProxy(path, buf);
+}
+
+function parseReadFileResult(buf, fileSize, encoding) {
+  if (encoding === 'utf8')
+    return buf.readUtf8String(fileSize);
+
+  const value = Buffer.from(buf.readByteArray(fileSize));
+  if (encoding !== null)
+    return value.toString(encoding);
+
+  return value;
 }
 
 const backend = isWindows ? windowsBackend : posixBackend;
@@ -957,6 +999,8 @@ if (isWindows) {
   apiSpec = [
     ['CreateFileW', SF, 'pointer', ['pointer', 'uint', 'uint', 'pointer', 'uint', 'uint', 'pointer']],
     ['DeleteFileW', SF, 'uint', ['pointer']],
+    ['GetFileSizeEx', SF, 'uint', ['pointer', 'pointer']],
+    ['ReadFile', SF, 'uint', ['pointer', 'pointer', 'uint', 'pointer', 'pointer']],
     ['RemoveDirectoryW', SF, 'uint', ['pointer']],
     ['CloseHandle', NF, 'uint', ['pointer']],
     ['FindFirstFileW', SF, 'pointer', ['pointer', 'pointer']],
