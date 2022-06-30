@@ -1,8 +1,10 @@
 import {Buffer} from 'buffer';
+import fsPath from 'path';
 import process from 'process';
 import stream from 'stream';
 
 const {platform, pointerSize} = Process;
+const isWindows = platform === 'windows';
 
 const S_IFMT = 0xf000;
 const S_IFREG = 0x8000;
@@ -83,6 +85,31 @@ const platformConstants = {
 };
 const constants = Object.assign({}, universalConstants, platformConstants[platform] || {});
 
+const INVALID_HANDLE_VALUE = ptr(-1);
+
+const GENERIC_READ = 0x80000000;
+const GENERIC_WRITE = 0x40000000;
+
+const FILE_SHARE_READ = 0x1;
+const FILE_SHARE_WRITE = 0x2;
+const FILE_SHARE_DELETE = 0x4;
+
+const CREATE_ALWAYS = 2;
+const OPEN_EXISTING = 3;
+
+const FILE_ATTRIBUTE_NORMAL = 0x80;
+const FILE_ATTRIBUTE_DIRECTORY = 0x10;
+const FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
+
+const IO_REPARSE_TAG_MOUNT_POINT = 0xa0000003;
+const IO_REPARSE_TAG_SYMLINK = 0xa000000c;
+
+const FILE_FLAG_OVERLAPPED = 0x40000000;
+const FILE_FLAG_BACKUP_SEMANTICS = 0x2000000;
+
+const ERROR_NOT_ENOUGH_MEMORY = 8;
+const ERROR_SHARING_VIOLATION = 32;
+
 const SEEK_SET = 0;
 const SEEK_CUR = 1;
 const SEEK_END = 2;
@@ -98,16 +125,40 @@ class ReadStream extends stream.Readable {
     this._input = null;
     this._readRequest = null;
 
-    const pathStr = Memory.allocUtf8String(path);
-    const fd = getApi().open(pathStr, constants.O_RDONLY, 0);
-    if (fd.value === -1) {
-      process.nextTick(() => {
-        this.destroy(new Error(getErrorString(fd.errno)));
-      });
-      return;
-    }
+    const api = getApi();
 
-    this._input = new UnixInputStream(fd.value, { autoClose: true });
+    if (isWindows) {
+      const result = api.CreateFileW(
+          Memory.allocUtf16String(path),
+          GENERIC_READ,
+          FILE_SHARE_READ,
+          NULL,
+          OPEN_EXISTING,
+          FILE_FLAG_OVERLAPPED,
+          NULL);
+
+      const handle = result.value;
+      if (handle.equals(INVALID_HANDLE_VALUE)) {
+        process.nextTick(() => {
+          this.destroy(makeWindowsError(result.lastError));
+        });
+        return;
+      }
+
+      this._input = new Win32InputStream(handle, { autoClose: true });
+    } else {
+      const result = api.open(Memory.allocUtf8String(path), constants.O_RDONLY, 0);
+
+      const fd = result.value;
+      if (fd === -1) {
+        process.nextTick(() => {
+          this.destroy(makePosixError(result.errno));
+        });
+        return;
+      }
+
+      this._input = new UnixInputStream(fd, { autoClose: true });
+    }
   }
 
   _destroy(err, callback) {
@@ -151,18 +202,43 @@ class WriteStream extends stream.Writable {
     this._output = null;
     this._writeRequest = null;
 
-    const pathStr = Memory.allocUtf8String(path);
-    const flags = constants.O_WRONLY | constants.O_CREAT;
-    const mode = constants.S_IRUSR | constants.S_IWUSR | constants.S_IRGRP | constants.S_IROTH;
-    const fd = getApi().open(pathStr, flags, mode);
-    if (fd.value === -1) {
-      process.nextTick(() => {
-        this.destroy(new Error(getErrorString(fd.errno)));
-      });
-      return;
-    }
+    const api = getApi();
 
-    this._output = new UnixOutputStream(fd.value, { autoClose: true });
+    if (isWindows) {
+      const result = api.CreateFileW(
+          Memory.allocUtf16String(path),
+          GENERIC_WRITE,
+          0,
+          NULL,
+          CREATE_ALWAYS,
+          FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+          NULL);
+
+      const handle = result.value;
+      if (handle.equals(INVALID_HANDLE_VALUE)) {
+        process.nextTick(() => {
+          this.destroy(makeWindowsError(result.lastError));
+        });
+        return;
+      }
+
+      this._output = new Win32OutputStream(handle, { autoClose: true });
+    } else {
+      const pathStr = Memory.allocUtf8String(path);
+      const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC;
+      const mode = constants.S_IRUSR | constants.S_IWUSR | constants.S_IRGRP | constants.S_IROTH;
+      const result = getApi().open(pathStr, flags, mode);
+
+      const fd = result.value;
+      if (fd === -1) {
+        process.nextTick(() => {
+          this.destroy(makePosixError(result.errno));
+        });
+        return;
+      }
+
+      this._output = new UnixOutputStream(fd, { autoClose: true });
+    }
   }
 
   _destroy(err, callback) {
@@ -192,7 +268,286 @@ class WriteStream extends stream.Writable {
   }
 }
 
+const windowsBackend = {
+  enumerateDirectoryEntries(path, callback) {
+    enumerateWindowsDirectoryEntriesMatching(path + '\\*', callback);
+  },
+
+  readFileSync(path, options = {}) {
+    if (typeof options === 'string')
+      options = { encoding: options };
+    const {encoding = null} = options;
+
+    const {CreateFileW, GetFileSizeEx, ReadFile, CloseHandle} = getApi();
+
+    const createRes = CreateFileW(
+        Memory.allocUtf16String(path),
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        NULL,
+        OPEN_EXISTING,
+        0,
+        NULL);
+    const handle = createRes.value;
+    if (handle.equals(INVALID_HANDLE_VALUE))
+      throwWindowsError(createRes.lastError);
+
+    try {
+      const scratchBuf = Memory.alloc(8);
+
+      const fileSizeBuf = scratchBuf;
+      const getRes = GetFileSizeEx(handle, fileSizeBuf);
+      if (getRes.value === 0)
+          throwWindowsError(getRes.lastError);
+      const fileSize = fileSizeBuf.readU64().valueOf();
+
+      const buf = Memory.alloc(fileSize);
+
+      const numBytesReadBuf = scratchBuf;
+      const readRes = ReadFile(handle, buf, fileSize, numBytesReadBuf, NULL);
+      if (readRes.value === 0)
+        throwWindowsError(readRes.lastError);
+      const n = numBytesReadBuf.readU32();
+
+      if (n !== fileSize)
+        throw new Error('Short read');
+
+      return parseReadFileResult(buf, fileSize, encoding);
+    } finally {
+      CloseHandle(handle);
+    }
+  },
+
+  readlinkSync(path) {
+    const {CreateFileW, GetFinalPathNameByHandleW, CloseHandle} = getApi();
+
+    const createRes = CreateFileW(
+        Memory.allocUtf16String(path),
+        0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        NULL);
+    const handle = createRes.value;
+    if (handle.equals(INVALID_HANDLE_VALUE))
+      throwWindowsError(createRes.lastError);
+
+    try {
+      let maxLength = 256;
+      while (true) {
+        const buf = Memory.alloc(maxLength * 2);
+
+        const {value, lastError} = GetFinalPathNameByHandleW(handle, buf, maxLength, 0);
+        if (value === 0)
+          throwWindowsError(lastError);
+        if (lastError === ERROR_NOT_ENOUGH_MEMORY) {
+          maxLength *= 2;
+          continue;
+        }
+
+        return buf.readUtf16String().substring(4);
+      }
+    } finally {
+      CloseHandle(handle);
+    }
+  },
+
+  rmdirSync(path) {
+    const result = getApi().RemoveDirectoryW(Memory.allocUtf16String(path));
+    if (result.value === 0)
+      throwWindowsError(result.lastError);
+  },
+
+  unlinkSync(path) {
+    const result = getApi().DeleteFileW(Memory.allocUtf16String(path));
+    if (result.value === 0)
+      throwWindowsError(result.lastError);
+  },
+
+  statSync(path) {
+    const s = windowsBackend.lstatSync(path);
+    if (!s.isSymbolicLink())
+      return s;
+
+    const target = windowsBackend.readlinkSync(path);
+    return windowsBackend.lstatSync(target);
+  },
+
+  lstatSync(path) {
+    const getFileExInfoStandard = 0;
+    const buf = Memory.alloc(36);
+    const result = getApi().GetFileAttributesExW(Memory.allocUtf16String(path), getFileExInfoStandard, buf);
+    if (result.value === 0) {
+      if (result.lastError === ERROR_SHARING_VIOLATION) {
+        let fileAttrData = null;
+        enumerateWindowsDirectoryEntriesMatching(path, data => {
+          // WIN32_FIND_DATAW starts with the exact same fields as WIN32_FILE_ATTRIBUTE_DATA
+          fileAttrData = Memory.dup(data, 36);
+        });
+        return makeStatsProxy(path, fileAttrData);
+      }
+      throwWindowsError(result.lastError);
+    }
+    return makeStatsProxy(path, buf);
+  },
+};
+
+function enumerateWindowsDirectoryEntriesMatching(filename, callback) {
+  const {FindFirstFileW, FindNextFileW, FindClose} = getApi();
+
+  const data = Memory.alloc(592);
+
+  const result = FindFirstFileW(Memory.allocUtf16String(filename), data);
+  const handle = result.value;
+  if (handle.equals(INVALID_HANDLE_VALUE))
+    throwWindowsError(result.lastError);
+
+  try {
+    do {
+      callback(data);
+    } while (FindNextFileW(handle, data) !== 0);
+  } finally {
+    FindClose(handle);
+  }
+}
+
+const posixBackend = {
+  enumerateDirectoryEntries(path, callback) {
+    const {opendir, opendir$INODE64, closedir, readdir, readdir$INODE64} = getApi();
+
+    const opendirImpl = opendir$INODE64 || opendir;
+    const readdirImpl = readdir$INODE64 || readdir;
+
+    const dir = opendirImpl(Memory.allocUtf8String(path));
+    const dirHandle = dir.value;
+    if (dirHandle.isNull())
+      throwPosixError(dir.errno);
+
+    try {
+      let entry;
+      while (!((entry = readdirImpl(dirHandle)).isNull())) {
+        callback(entry);
+      }
+    } finally {
+      closedir(dirHandle);
+    }
+  },
+
+  readFileSync(path, options = {}) {
+    if (typeof options === 'string')
+      options = { encoding: options };
+    const {encoding = null} = options;
+
+    const {open, close, lseek, read} = getApi();
+
+    const openResult = open(Memory.allocUtf8String(path), constants.O_RDONLY, 0);
+    const fd = openResult.value;
+    if (fd === -1)
+      throwPosixError(openResult.errno);
+
+    try {
+      const fileSize = lseek(fd, 0, SEEK_END).valueOf();
+
+      lseek(fd, 0, SEEK_SET);
+
+      const buf = Memory.alloc(fileSize);
+      let readResult, n, readFailed;
+      do {
+        readResult = read(fd, buf, fileSize);
+        n = readResult.value.valueOf();
+        readFailed = n === -1;
+      } while (readFailed && readResult.errno === EINTR);
+
+      if (readFailed)
+        throwPosixError(readResult.errno);
+
+      if (n !== fileSize.valueOf())
+        throw new Error('Short read');
+
+      return parseReadFileResult(buf, fileSize, encoding);
+    } finally {
+      close(fd);
+    }
+  },
+
+  readlinkSync(path) {
+    const api = getApi();
+
+    const pathStr = Memory.allocUtf8String(path);
+
+    const linkSize = posixBackend.lstatSync(path).size.valueOf();
+    const buf = Memory.alloc(linkSize);
+
+    const result = api.readlink(pathStr, buf, linkSize);
+    const n = result.value.valueOf();
+    if (n === -1)
+      throwPosixError(result.errno);
+
+    return buf.readUtf8String(n);
+  },
+
+  rmdirSync(path) {
+    const result = getApi().rmdir(Memory.allocUtf8String(path));
+    if (result.value === -1)
+      throwPosixError(result.errno);
+  },
+
+  unlinkSync(path) {
+    const result = getApi().unlink(Memory.allocUtf8String(path));
+    if (result.value === -1)
+      throwPosixError(result.errno);
+  },
+
+  statSync(path) {
+    return performStatPosix(getStatSpec()._stat, path);
+  },
+
+  lstatSync(path) {
+    return performStatPosix(getStatSpec()._lstat, path);
+  },
+};
+
+function performStatPosix(impl, path) {
+  const buf = Memory.alloc(statBufSize);
+  const result = impl(Memory.allocUtf8String(path), buf);
+  if (result.value !== 0)
+    throwPosixError(result.errno);
+  return makeStatsProxy(path, buf);
+}
+
+function parseReadFileResult(buf, fileSize, encoding) {
+  if (encoding === 'utf8')
+    return buf.readUtf8String(fileSize);
+
+  const value = Buffer.from(buf.readByteArray(fileSize));
+  if (encoding !== null)
+    return value.toString(encoding);
+
+  return value;
+}
+
+const backend = isWindows ? windowsBackend : posixBackend;
+
+const {
+  enumerateDirectoryEntries,
+  readFileSync,
+  readlinkSync,
+  rmdirSync,
+  unlinkSync,
+  statSync,
+  lstatSync,
+} = backend;
+
 const direntSpecs = {
+  'windows': {
+    'd_name': [44, 'Utf16String'],
+    'd_type': [0, readWindowsFileAttributes],
+    'atime': [12, readWindowsFileTime],
+    'mtime': [20, readWindowsFileTime],
+    'ctime': [4, readWindowsFileTime],
+    'size': [28, readWindowsFileSize],
+  },
   'linux-32': {
     'd_name': [11, 'Utf8String'],
     'd_type': [10, 'U8']
@@ -211,7 +566,7 @@ const direntSpecs = {
   }
 };
 
-const direntSpec = direntSpecs[`${platform}-${pointerSize * 8}`];
+const direntSpec = isWindows ? direntSpecs.windows : direntSpecs[`${platform}-${pointerSize * 8}`];
 
 function readdirSync(path) {
   const entries = [];
@@ -223,126 +578,36 @@ function readdirSync(path) {
 }
 
 function list(path) {
+  const extraFieldNames = Object.keys(direntSpec).filter(k => !k.startsWith('d_'));
+
   const entries = [];
   enumerateDirectoryEntries(path, entry => {
+    const name = readDirentField(entry, 'd_name');
+    const type = readDirentField(entry, 'd_type', fsPath.join(path, name));
+
+    const extras = {};
+    for (const f of extraFieldNames)
+      extras[f] = readDirentField(entry, f);
+
     entries.push({
-      name: readDirentField(entry, 'd_name'),
-      type: readDirentField(entry, 'd_type')
+      name,
+      type,
+      ...extras
     });
   });
   return entries;
 }
 
-function enumerateDirectoryEntries(path, callback) {
-  const {opendir, opendir$INODE64, closedir, readdir, readdir$INODE64} = getApi();
-
-  const opendirImpl = opendir$INODE64 || opendir;
-  const readdirImpl = readdir$INODE64 || readdir;
-
-  const dir = opendirImpl(Memory.allocUtf8String(path));
-  const dirHandle = dir.value;
-  if (dirHandle.isNull())
-    throw new Error(getErrorString(dir.errno));
-
-  try {
-    let entry;
-    while (!((entry = readdirImpl(dirHandle)).isNull())) {
-      callback(entry);
-    }
-  } finally {
-    closedir(dirHandle);
-  }
-}
-
-function readDirentField(entry, name) {
+function readDirentField(entry, name, ...args) {
   const [offset, type] = direntSpec[name];
 
-  const read = (typeof type === 'string') ? Memory['read' + type] : type;
+  const read = (typeof type === 'string') ? NativePointer.prototype['read' + type] : type;
 
-  const value = read(entry.add(offset));
+  const value = read.call(entry.add(offset), ...args);
   if (value instanceof Int64 || value instanceof UInt64)
     return value.valueOf();
 
   return value;
-}
-
-function readFileSync(path, options = {}) {
-  if (typeof options === 'string')
-    options = { encoding: options };
-  const {encoding = null} = options;
-
-  const {open, close, lseek, read} = getApi();
-
-  const pathStr = Memory.allocUtf8String(path);
-  const openResult = open(pathStr, constants.O_RDONLY, 0);
-  const fd = openResult.value;
-  if (fd === -1)
-    throw new Error(getErrorString(openResult.errno));
-
-  try {
-    const fileSize = lseek(fd, 0, SEEK_END).valueOf();
-
-    lseek(fd, 0, SEEK_SET);
-
-    const buf = Memory.alloc(fileSize);
-    let readResult, n, readFailed;
-    do {
-      readResult = read(fd, buf, fileSize);
-      n = readResult.value.valueOf();
-      readFailed = n === -1;
-    } while (readFailed && readResult.errno === EINTR);
-
-    if (readFailed)
-      throw new Error(getErrorString(readResult.errno));
-
-    if (n !== fileSize.valueOf())
-      throw new Error('Short read');
-
-    if (encoding === 'utf8') {
-      return buf.readUtf8String(fileSize);
-    }
-
-    const value = Buffer.from(buf.readByteArray(fileSize));
-    if (encoding !== null) {
-      return value.toString(encoding);
-    }
-
-    return value;
-  } finally {
-    close(fd);
-  }
-}
-
-function readlinkSync(path) {
-  const api = getApi();
-
-  const pathStr = Memory.allocUtf8String(path);
-
-  const linkSize = lstatSync(path).size.valueOf();
-  const buf = Memory.alloc(linkSize);
-
-  const result = api.readlink(pathStr, buf, linkSize);
-  const n = result.value.valueOf();
-  if (n === -1)
-    throw new Error(getErrorString(result.errno));
-
-  return buf.readUtf8String(n);
-}
-
-function rmdirSync(path) {
-  const pathStr = Memory.allocUtf8String(path);
-
-  const result = getApi().rmdir(pathStr);
-  if (result.value === -1)
-    throw new Error(getErrorString(result.errno));
-}
-
-function unlinkSync(path) {
-  const pathStr = Memory.allocUtf8String(path);
-
-  const result = getApi().unlink(pathStr);
-  if (result.value === -1)
-    throw new Error(getErrorString(result.errno));
 }
 
 const statFields = new Set([
@@ -366,6 +631,24 @@ const statFields = new Set([
   'birthtime',
 ]);
 const statSpecs = {
+  'windows': {
+    size: 36,
+    fields: {
+      'dev': [ 0, returnZero ],
+      'mode': [ 0, readWindowsFileAttributes ],
+      'nlink': [ 0, returnOne ],
+      'ino': [ 0, returnZero ],
+      'uid': [ 0, returnZero ],
+      'gid': [ 0, returnZero ],
+      'rdev': [ 0, returnZero ],
+      'atime': [ 12, readWindowsFileTime ],
+      'mtime': [ 20, readWindowsFileTime ],
+      'ctime': [ 4, readWindowsFileTime ],
+      'size': [ 28, readWindowsFileSize ],
+      'blocks': [ 28, readWindowsFileSize ],
+      'blksize': [ 0, returnOne ],
+    },
+  },
   'darwin-32': {
     size: 108,
     fields: {
@@ -466,21 +749,26 @@ function getStatSpec() {
   if (cachedStatSpec !== null)
     return cachedStatSpec;
 
-  const api = getApi();
-  const stat64Impl = api.stat64 ?? api.__xstat64;
+  let statSpec;
+  if (isWindows) {
+    statSpec = statSpecs.windows;
+  } else {
+    const api = getApi();
+    const stat64Impl = api.stat64 ?? api.__xstat64;
 
-  let platformId = `${platform}-${pointerSize * 8}`;
-  if (platformId === 'linux-32') {
-    if (stat64Impl !== undefined)
-      platformId += '-stat64';
+    let platformId = `${platform}-${pointerSize * 8}`;
+    if (platformId === 'linux-32') {
+      if (stat64Impl !== undefined)
+        platformId += '-stat64';
+    }
+
+    statSpec = statSpecs[platformId];
+    if (statSpec === undefined)
+      throw new Error('Current OS is not yet supported; please open a PR');
+
+    statSpec._stat = stat64Impl ?? api.stat;
+    statSpec._lstat = api.lstat64 ?? api.__lxstat64 ?? api.lstat;
   }
-
-  const statSpec = statSpecs[platformId];
-  if (statSpec === undefined)
-    throw new Error('Current OS is not yet supported; please open a PR');
-
-  statSpec._stat = stat64Impl ?? api.stat;
-  statSpec._lstat = api.lstat64 ?? api.__lxstat64 ?? api.lstat;
 
   cachedStatSpec = statSpec;
 
@@ -517,20 +805,7 @@ class Stats {
   }
 }
 
-function statSync(path) {
-  return performStat(getStatSpec()._stat, path);
-}
-
-function lstatSync(path) {
-  return performStat(getStatSpec()._lstat, path);
-}
-
-function performStat(impl, path) {
-  const buf = Memory.alloc(statBufSize);
-  const result = impl(Memory.allocUtf8String(path), buf);
-  if (result.value !== 0)
-    throw new Error(getErrorString(result.errno));
-
+function makeStatsProxy(path, buf) {
   return new Proxy(new Stats(), {
     has(target, property) {
       return statsHasField(property);
@@ -550,7 +825,7 @@ function performStat(impl, path) {
         default:
           if (property in target)
             return target[property];
-          const value = statsReadField.call(receiver, property);
+          const value = statsReadField.call(receiver, property, path);
           return (value !== null) ? value : undefined;
       }
     },
@@ -574,7 +849,7 @@ function statsHasField(name) {
   return statFields.has(name);
 }
 
-function statsReadField(name) {
+function statsReadField(name, path) {
   let field = getStatSpec().fields[name];
   if (field === undefined) {
     if (name === 'birthtime') {
@@ -591,32 +866,105 @@ function statsReadField(name) {
 
   const [offset, type] = field;
 
-  const read = (typeof type === 'string') ? Memory['read' + type] : type;
+  const read = (typeof type === 'string') ? NativePointer.prototype['read' + type] : type;
 
-  const value = read(this.buffer.add(offset));
+  const value = read.call(this.buffer.add(offset), path);
   if (value instanceof Int64 || value instanceof UInt64)
     return value.valueOf();
 
   return value;
 }
 
-function readTimespec32(address) {
-  const sec = address.readU32();
-  const nsec = address.add(4).readU32();
+function readWindowsFileAttributes(path) {
+  const attributes = this.readU32();
+
+  let isLink = false;
+  if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) !== 0) {
+    enumerateWindowsDirectoryEntriesMatching(path, data => {
+      const reserved0 = data.add(36).readU32();
+      isLink = (reserved0 === IO_REPARSE_TAG_MOUNT_POINT || reserved0 === IO_REPARSE_TAG_SYMLINK);
+    });
+  }
+
+  const isDir = (attributes & FILE_ATTRIBUTE_DIRECTORY) !== 0;
+
+  let mode;
+  if (isLink)
+    mode = S_IFLNK;
+  else if (isDir)
+    mode = S_IFDIR;
+  else
+    mode = S_IFREG;
+
+  if (isDir)
+    mode |= 0x1ed;
+  else
+    mode |= 0x1a4;
+
+  return mode;
+}
+
+function readWindowsFileTime() {
+  const fileTime = BigInt(this.readU64().toString()).valueOf();
+  const ticksPerMsec = 10000n;
+  const msecToUnixEpoch = 11644473600000n;
+  const unixTime = (fileTime / ticksPerMsec) - msecToUnixEpoch;
+  return new Date(parseInt(unixTime));
+}
+
+function readWindowsFileSize() {
+  const high = this.readU32();
+  const low = this.add(4).readU32();
+  return uint64(high).shl(32).or(low);
+}
+
+function readTimespec32() {
+  const sec = this.readU32();
+  const nsec = this.add(4).readU32();
   const msec = nsec / 1000000;
   return new Date((sec * 1000) + msec);
 }
 
-function readTimespec64(address) {
+function readTimespec64() {
   // FIXME: Improve UInt64 to support division
-  const sec = address.readU64().valueOf();
-  const nsec = address.add(8).readU64().valueOf();
+  const sec = this.readU64().valueOf();
+  const nsec = this.add(8).readU64().valueOf();
   const msec = nsec / 1000000;
   return new Date((sec * 1000) + msec);
 }
 
-function getErrorString(errno) {
-  return getApi().strerror(errno).readUtf8String();
+function returnZero() {
+  return 0;
+}
+
+function returnOne() {
+  return 1;
+}
+
+function throwWindowsError(lastError) {
+  throw makeWindowsError(lastError);
+}
+
+function throwPosixError(errno) {
+  throw makePosixError(errno);
+}
+
+function makeWindowsError(lastError) {
+  const maxLength = 256;
+
+  const FORMAT_MESSAGE_FROM_SYSTEM = 0x00001000;
+  const FORMAT_MESSAGE_IGNORE_INSERTS = 0x00000200;
+
+  const buf = Memory.alloc(maxLength * 2);
+  getApi().FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+      NULL, lastError, 0, buf, maxLength, NULL);
+
+  return new Error(buf.readUtf16String());
+}
+
+function makePosixError(errno) {
+  const message = getApi().strerror(errno).readUtf8String();
+  return new Error(message);
 }
 
 function callbackify(original) {
@@ -640,31 +988,51 @@ function callbackify(original) {
 const SF = SystemFunction;
 const NF = NativeFunction;
 
+const nativeOpts = (isWindows && pointerSize === 4) ? { abi: 'stdcall' } : {};
+
 const ssizeType = (pointerSize === 8) ? 'int64' : 'int32';
 const sizeType = 'u' + ssizeType;
 const offsetType = (platform === 'darwin' || pointerSize === 8) ? 'int64' : 'int32';
 
-const apiSpec = [
-  ['open', SF, 'int', ['pointer', 'int', '...', 'int']],
-  ['close', NF, 'int', ['int']],
-  ['lseek', NF, offsetType, ['int', offsetType, 'int']],
-  ['read', SF, ssizeType, ['int', 'pointer', sizeType]],
-  ['opendir', SF, 'pointer', ['pointer']],
-  ['opendir$INODE64', SF, 'pointer', ['pointer']],
-  ['closedir', NF, 'int', ['pointer']],
-  ['readdir', NF, 'pointer', ['pointer']],
-  ['readdir$INODE64', NF, 'pointer', ['pointer']],
-  ['readlink', SF, ssizeType, ['pointer', 'pointer', sizeType]],
-  ['rmdir', SF, 'int', ['pointer']],
-  ['unlink', SF, 'int', ['pointer']],
-  ['stat', SF, 'int', ['pointer', 'pointer']],
-  ['stat64', SF, 'int', ['pointer', 'pointer']],
-  ['__xstat64', SF, 'int', ['int', 'pointer', 'pointer'], invokeXstat],
-  ['lstat', SF, 'int', ['pointer', 'pointer']],
-  ['lstat64', SF, 'int', ['pointer', 'pointer']],
-  ['__lxstat64', SF, 'int', ['int', 'pointer', 'pointer'], invokeXstat],
-  ['strerror', NF, 'pointer', ['int']],
-];
+let apiSpec;
+if (isWindows) {
+  apiSpec = [
+    ['CreateFileW', SF, 'pointer', ['pointer', 'uint', 'uint', 'pointer', 'uint', 'uint', 'pointer']],
+    ['DeleteFileW', SF, 'uint', ['pointer']],
+    ['GetFileSizeEx', SF, 'uint', ['pointer', 'pointer']],
+    ['ReadFile', SF, 'uint', ['pointer', 'pointer', 'uint', 'pointer', 'pointer']],
+    ['RemoveDirectoryW', SF, 'uint', ['pointer']],
+    ['CloseHandle', NF, 'uint', ['pointer']],
+    ['FindFirstFileW', SF, 'pointer', ['pointer', 'pointer']],
+    ['FindNextFileW', NF, 'uint', ['pointer', 'pointer']],
+    ['FindClose', NF, 'uint', ['pointer']],
+    ['GetFileAttributesExW', SF, 'uint', ['pointer', 'uint', 'pointer']],
+    ['GetFinalPathNameByHandleW', SF, 'uint', ['pointer', 'pointer', 'uint', 'uint']],
+    ['FormatMessageW', NF, 'uint', ['uint', 'pointer', 'uint', 'uint', 'pointer', 'uint', 'pointer']],
+  ];
+} else {
+  apiSpec = [
+    ['open', SF, 'int', ['pointer', 'int', '...', 'int']],
+    ['close', NF, 'int', ['int']],
+    ['lseek', NF, offsetType, ['int', offsetType, 'int']],
+    ['read', SF, ssizeType, ['int', 'pointer', sizeType]],
+    ['opendir', SF, 'pointer', ['pointer']],
+    ['opendir$INODE64', SF, 'pointer', ['pointer']],
+    ['closedir', NF, 'int', ['pointer']],
+    ['readdir', NF, 'pointer', ['pointer']],
+    ['readdir$INODE64', NF, 'pointer', ['pointer']],
+    ['readlink', SF, ssizeType, ['pointer', 'pointer', sizeType]],
+    ['rmdir', SF, 'int', ['pointer']],
+    ['unlink', SF, 'int', ['pointer']],
+    ['stat', SF, 'int', ['pointer', 'pointer']],
+    ['stat64', SF, 'int', ['pointer', 'pointer']],
+    ['__xstat64', SF, 'int', ['int', 'pointer', 'pointer'], invokeXstat],
+    ['lstat', SF, 'int', ['pointer', 'pointer']],
+    ['lstat64', SF, 'int', ['pointer', 'pointer']],
+    ['__lxstat64', SF, 'int', ['int', 'pointer', 'pointer'], invokeXstat],
+    ['strerror', NF, 'pointer', ['int']],
+  ];
+}
 
 function invokeXstat(impl, path, buf) {
   const STAT_VER_LINUX = 3;
@@ -691,9 +1059,11 @@ function addApiPlaceholder(api, entry) {
       const [, Ctor, retType, argTypes, wrapper] = entry;
 
       let impl = null;
-      const address = Module.findExportByName(null, name);
+      const address = isWindows
+          ? Module.findExportByName('kernel32.dll', name)
+          : Module.findExportByName(null, name);
       if (address !== null)
-        impl = new Ctor(address, retType, argTypes);
+        impl = new Ctor(address, retType, argTypes, nativeOpts);
 
       if (wrapper !== undefined)
         impl = wrapper.bind(null, impl);
