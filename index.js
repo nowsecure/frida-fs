@@ -84,6 +84,10 @@ const platformConstants = {
 };
 const constants = Object.assign({}, universalConstants, platformConstants[platform] || {});
 
+const INVALID_HANDLE_VALUE = ptr(-1);
+
+const FILE_FLAG_OVERLAPPED = 0x40000000;
+
 const SEEK_SET = 0;
 const SEEK_CUR = 1;
 const SEEK_END = 2;
@@ -99,16 +103,44 @@ class ReadStream extends stream.Readable {
     this._input = null;
     this._readRequest = null;
 
-    const pathStr = Memory.allocUtf8String(path);
-    const fd = getApi().open(pathStr, constants.O_RDONLY, 0);
-    if (fd.value === -1) {
-      process.nextTick(() => {
-        this.destroy(new Error(getLibcErrorString(fd.errno)));
-      });
-      return;
-    }
+    const api = getApi();
 
-    this._input = new UnixInputStream(fd.value, { autoClose: true });
+    if (isWindows) {
+      const GENERIC_READ = 0x80000000;
+      const FILE_SHARE_READ = 0x1;
+      const OPEN_EXISTING = 3;
+
+      const result = api.CreateFileW(
+          Memory.allocUtf16String(path),
+          GENERIC_READ,
+          FILE_SHARE_READ,
+          NULL,
+          OPEN_EXISTING,
+          FILE_FLAG_OVERLAPPED,
+          NULL);
+
+      const handle = result.value;
+      if (handle.equals(INVALID_HANDLE_VALUE)) {
+        process.nextTick(() => {
+          this.destroy(makeWindowsError(result.lastError));
+        });
+        return;
+      }
+
+      this._input = new Win32InputStream(handle, { autoClose: true });
+    } else {
+      const result = api.open(Memory.allocUtf8String(path), constants.O_RDONLY, 0);
+
+      const fd = result.value;
+      if (fd === -1) {
+        process.nextTick(() => {
+          this.destroy(makeUnixError(result.errno));
+        });
+        return;
+      }
+
+      this._input = new UnixInputStream(fd, { autoClose: true });
+    }
   }
 
   _destroy(err, callback) {
@@ -152,18 +184,47 @@ class WriteStream extends stream.Writable {
     this._output = null;
     this._writeRequest = null;
 
-    const pathStr = Memory.allocUtf8String(path);
-    const flags = constants.O_WRONLY | constants.O_CREAT;
-    const mode = constants.S_IRUSR | constants.S_IWUSR | constants.S_IRGRP | constants.S_IROTH;
-    const fd = getApi().open(pathStr, flags, mode);
-    if (fd.value === -1) {
-      process.nextTick(() => {
-        this.destroy(new Error(getLibcErrorString(fd.errno)));
-      });
-      return;
-    }
+    const api = getApi();
 
-    this._output = new UnixOutputStream(fd.value, { autoClose: true });
+    if (isWindows) {
+      const GENERIC_WRITE = 0x40000000;
+      const CREATE_ALWAYS = 2;
+      const FILE_ATTRIBUTE_NORMAL = 0x80;
+
+      const result = api.CreateFileW(
+          Memory.allocUtf16String(path),
+          GENERIC_WRITE,
+          0,
+          NULL,
+          CREATE_ALWAYS,
+          FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+          NULL);
+
+      const handle = result.value;
+      if (handle.equals(INVALID_HANDLE_VALUE)) {
+        process.nextTick(() => {
+          this.destroy(makeWindowsError(result.lastError));
+        });
+        return;
+      }
+
+      this._output = new Win32OutputStream(handle, { autoClose: true });
+    } else {
+      const pathStr = Memory.allocUtf8String(path);
+      const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC;
+      const mode = constants.S_IRUSR | constants.S_IWUSR | constants.S_IRGRP | constants.S_IROTH;
+      const result = getApi().open(pathStr, flags, mode);
+
+      const fd = result.value;
+      if (fd === -1) {
+        process.nextTick(() => {
+          this.destroy(makeUnixError(result.errno));
+        });
+        return;
+      }
+
+      this._output = new UnixOutputStream(fd, { autoClose: true });
+    }
   }
 
   _destroy(err, callback) {
@@ -240,9 +301,8 @@ function list(path) {
 
 function enumerateDirectoryEntriesWindows(path, callback) {
   const {FindFirstFileW, FindNextFileW, FindClose} = getApi();
-  const INVALID_HANDLE_VALUE = ptr(-1);
 
-  const data = Memory.alloc(128 * 1024); // FIXME
+  const data = Memory.alloc(592);
 
   const result = FindFirstFileW(Memory.allocUtf16String(path + '\\*'), data);
   const handle = result.value;
@@ -581,7 +641,6 @@ function performStatWindows(path) {
   const getFileExInfoStandard = 0;
   const buf = Memory.alloc(36);
   const result = getApi().GetFileAttributesExW(Memory.allocUtf16String(path), getFileExInfoStandard, buf);
-  console.log(`stat() path=\"${path}\" result=${JSON.stringify(result)}`);
   if (result.value === 0)
     throwWindowsError(result.lastError);
   return makeStatsProxy(buf);
@@ -679,9 +738,9 @@ function readWindowsFileAttributes() {
 
 function readWindowsFileTime() {
   const fileTime = BigInt(this.readU64().toString()).valueOf();
-  const hundredNsecInMsec = 10000n;
+  const ticksPerMsec = 10000n;
   const msecToUnixEpoch = 11644473600000n;
-  const unixTime = (fileTime / hundredNsecInMsec) + msecToUnixEpoch;
+  const unixTime = (fileTime / ticksPerMsec) - msecToUnixEpoch;
   return new Date(parseInt(unixTime));
 }
 
@@ -730,18 +789,14 @@ function makeWindowsError(lastError) {
 
   const buf = Memory.alloc(maxLength * 2);
   getApi().FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-      NULL, lastError, 0 /* MAKELANGID (LANG_NEUTRAL, SUBLANG_DEFAULT) */,
-      buf, maxLength, NULL);
+      NULL, lastError, 0, buf, maxLength, NULL);
 
   return new Error(buf.readUtf16String());
 }
 
 function makeUnixError(errno) {
-  return new Error(getLibcErrorString(errno));
-}
-
-function getLibcErrorString(errno) {
-  return getApi().strerror(errno).readUtf8String();
+  const message = getApi().strerror(errno).readUtf8String();
+  return new Error(message);
 }
 
 function callbackify(original) {
@@ -774,6 +829,7 @@ const offsetType = (platform === 'darwin' || pointerSize === 8) ? 'int64' : 'int
 let apiSpec;
 if (isWindows) {
   apiSpec = [
+    ['CreateFileW', SF, 'pointer', ['pointer', 'uint', 'uint', 'pointer', 'uint', 'uint', 'pointer']],
     ['FindFirstFileW', SF, 'pointer', ['pointer', 'pointer']],
     ['FindNextFileW', NF, 'uint', ['pointer', 'pointer']],
     ['FindClose', NF, 'uint', ['pointer']],
