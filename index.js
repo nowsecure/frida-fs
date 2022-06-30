@@ -762,7 +762,7 @@ function getStatSpec() {
         platformId += '-stat64';
     }
 
-    const statSpec = statSpecs[platformId];
+    statSpec = statSpecs[platformId];
     if (statSpec === undefined)
       throw new Error('Current OS is not yet supported; please open a PR');
 
