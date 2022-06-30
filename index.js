@@ -1,4 +1,5 @@
 import {Buffer} from 'buffer';
+import fsPath from 'path';
 import process from 'process';
 import stream from 'stream';
 
@@ -107,6 +108,7 @@ const FILE_FLAG_OVERLAPPED = 0x40000000;
 const FILE_FLAG_BACKUP_SEMANTICS = 0x2000000;
 
 const ERROR_NOT_ENOUGH_MEMORY = 8;
+const ERROR_SHARING_VIOLATION = 32;
 
 const SEEK_SET = 0;
 const SEEK_CUR = 1;
@@ -271,6 +273,10 @@ const windowsBackend = {
     enumerateWindowsDirectoryEntriesMatching(path + '\\*', callback);
   },
 
+  readFileSync(path, options = {}) {
+    throw new Error('Not yet implemented');
+  },
+
   readlinkSync(path) {
     const {CreateFileW, GetFinalPathNameByHandleW, CloseHandle} = getApi();
 
@@ -332,8 +338,17 @@ const windowsBackend = {
     const getFileExInfoStandard = 0;
     const buf = Memory.alloc(36);
     const result = getApi().GetFileAttributesExW(Memory.allocUtf16String(path), getFileExInfoStandard, buf);
-    if (result.value === 0)
+    if (result.value === 0) {
+      if (result.lastError === ERROR_SHARING_VIOLATION) {
+        let fileAttrData = null;
+        enumerateWindowsDirectoryEntriesMatching(path, data => {
+          // WIN32_FIND_DATAW starts with the exact same fields as WIN32_FILE_ATTRIBUTE_DATA
+          fileAttrData = Memory.dup(data, 36);
+        });
+        return makeStatsProxy(path, fileAttrData);
+      }
       throwWindowsError(result.lastError);
+    }
     return makeStatsProxy(path, buf);
   },
 };
@@ -482,29 +497,14 @@ const {
   lstatSync,
 } = backend;
 
-function readdirSync(path) {
-  const entries = [];
-  enumerateDirectoryEntries(path, entry => {
-    const name = readDirentField(entry, 'd_name');
-    entries.push(name);
-  });
-  return entries;
-}
-
-function list(path) {
-  const entries = [];
-  enumerateDirectoryEntries(path, entry => {
-    entries.push({
-      name: readDirentField(entry, 'd_name'),
-      type: readDirentField(entry, 'd_type')
-    });
-  });
-  return entries;
-}
-
 const direntSpecs = {
   'windows': {
     'd_name': [44, 'Utf16String'],
+    'd_type': [0, readWindowsFileAttributes],
+    'atime': [12, readWindowsFileTime],
+    'mtime': [20, readWindowsFileTime],
+    'ctime': [4, readWindowsFileTime],
+    'size': [28, readWindowsFileSize],
   },
   'linux-32': {
     'd_name': [11, 'Utf8String'],
@@ -526,12 +526,42 @@ const direntSpecs = {
 
 const direntSpec = isWindows ? direntSpecs.windows : direntSpecs[`${platform}-${pointerSize * 8}`];
 
-function readDirentField(entry, name) {
+function readdirSync(path) {
+  const entries = [];
+  enumerateDirectoryEntries(path, entry => {
+    const name = readDirentField(entry, 'd_name');
+    entries.push(name);
+  });
+  return entries;
+}
+
+function list(path) {
+  const extraFieldNames = Object.keys(direntSpec).filter(k => !k.startsWith('d_'));
+
+  const entries = [];
+  enumerateDirectoryEntries(path, entry => {
+    const name = readDirentField(entry, 'd_name');
+    const type = readDirentField(entry, 'd_type', fsPath.join(path, name));
+
+    const extras = {};
+    for (const f of extraFieldNames)
+      extras[f] = readDirentField(entry, f);
+
+    entries.push({
+      name,
+      type,
+      ...extras
+    });
+  });
+  return entries;
+}
+
+function readDirentField(entry, name, ...args) {
   const [offset, type] = direntSpec[name];
 
   const read = (typeof type === 'string') ? NativePointer.prototype['read' + type] : type;
 
-  const value = read.call(entry.add(offset));
+  const value = read.call(entry.add(offset), ...args);
   if (value instanceof Int64 || value instanceof UInt64)
     return value.valueOf();
 
