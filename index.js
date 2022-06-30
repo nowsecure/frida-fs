@@ -86,7 +86,27 @@ const constants = Object.assign({}, universalConstants, platformConstants[platfo
 
 const INVALID_HANDLE_VALUE = ptr(-1);
 
+const GENERIC_READ = 0x80000000;
+const GENERIC_WRITE = 0x40000000;
+
+const FILE_SHARE_READ = 0x1;
+const FILE_SHARE_WRITE = 0x2;
+const FILE_SHARE_DELETE = 0x4;
+
+const CREATE_ALWAYS = 2;
+const OPEN_EXISTING = 3;
+
+const FILE_ATTRIBUTE_NORMAL = 0x80;
+const FILE_ATTRIBUTE_DIRECTORY = 0x10;
+const FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
+
+const IO_REPARSE_TAG_MOUNT_POINT = 0xa0000003;
+const IO_REPARSE_TAG_SYMLINK = 0xa000000c;
+
 const FILE_FLAG_OVERLAPPED = 0x40000000;
+const FILE_FLAG_BACKUP_SEMANTICS = 0x2000000;
+
+const ERROR_NOT_ENOUGH_MEMORY = 8;
 
 const SEEK_SET = 0;
 const SEEK_CUR = 1;
@@ -106,10 +126,6 @@ class ReadStream extends stream.Readable {
     const api = getApi();
 
     if (isWindows) {
-      const GENERIC_READ = 0x80000000;
-      const FILE_SHARE_READ = 0x1;
-      const OPEN_EXISTING = 3;
-
       const result = api.CreateFileW(
           Memory.allocUtf16String(path),
           GENERIC_READ,
@@ -187,10 +203,6 @@ class WriteStream extends stream.Writable {
     const api = getApi();
 
     if (isWindows) {
-      const GENERIC_WRITE = 0x40000000;
-      const CREATE_ALWAYS = 2;
-      const FILE_ATTRIBUTE_NORMAL = 0x80;
-
       const result = api.CreateFileW(
           Memory.allocUtf16String(path),
           GENERIC_WRITE,
@@ -256,21 +268,42 @@ class WriteStream extends stream.Writable {
 
 const windowsBackend = {
   enumerateDirectoryEntries(path, callback) {
-    const {FindFirstFileW, FindNextFileW, FindClose} = getApi();
+    enumerateWindowsDirectoryEntriesMatching(path + '\\*', callback);
+  },
 
-    const data = Memory.alloc(592);
+  readlinkSync(path) {
+    const {CreateFileW, GetFinalPathNameByHandleW, CloseHandle} = getApi();
 
-    const result = FindFirstFileW(Memory.allocUtf16String(path + '\\*'), data);
-    const handle = result.value;
+    const createRes = CreateFileW(
+        Memory.allocUtf16String(path),
+        0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        NULL);
+
+    const handle = createRes.value;
     if (handle.equals(INVALID_HANDLE_VALUE))
-      throwWindowsError(result.lastError);
+      throwWindowsError(createRes.lastError);
 
     try {
-      do {
-        callback(data);
-      } while (FindNextFileW(handle, data) !== 0);
+      let maxLength = 256;
+      while (true) {
+        const buf = Memory.alloc(maxLength * 2);
+
+        const {value, lastError} = GetFinalPathNameByHandleW(handle, buf, maxLength, 0);
+        if (value === 0)
+          throwWindowsError(lastError);
+        if (lastError === ERROR_NOT_ENOUGH_MEMORY) {
+          maxLength *= 2;
+          continue;
+        }
+
+        return buf.readUtf16String().substring(4);
+      }
     } finally {
-      FindClose(handle);
+      CloseHandle(handle);
     }
   },
 
@@ -287,7 +320,12 @@ const windowsBackend = {
   },
 
   statSync(path) {
-    return windowsBackend.lstatSync(path);
+    const s = windowsBackend.lstatSync(path);
+    if (!s.isSymbolicLink())
+      return s;
+
+    const target = windowsBackend.readlinkSync(path);
+    return windowsBackend.lstatSync(target);
   },
 
   lstatSync(path) {
@@ -296,9 +334,28 @@ const windowsBackend = {
     const result = getApi().GetFileAttributesExW(Memory.allocUtf16String(path), getFileExInfoStandard, buf);
     if (result.value === 0)
       throwWindowsError(result.lastError);
-    return makeStatsProxy(buf);
+    return makeStatsProxy(path, buf);
   },
 };
+
+function enumerateWindowsDirectoryEntriesMatching(filename, callback) {
+  const {FindFirstFileW, FindNextFileW, FindClose} = getApi();
+
+  const data = Memory.alloc(592);
+
+  const result = FindFirstFileW(Memory.allocUtf16String(filename), data);
+  const handle = result.value;
+  if (handle.equals(INVALID_HANDLE_VALUE))
+    throwWindowsError(result.lastError);
+
+  try {
+    do {
+      callback(data);
+    } while (FindNextFileW(handle, data) !== 0);
+  } finally {
+    FindClose(handle);
+  }
+}
 
 const posixBackend = {
   enumerateDirectoryEntries(path, callback) {
@@ -410,7 +467,7 @@ function performStatPosix(impl, path) {
   const result = impl(Memory.allocUtf8String(path), buf);
   if (result.value !== 0)
     throwPosixError(result.errno);
-  return makeStatsProxy(buf);
+  return makeStatsProxy(path, buf);
 }
 
 const backend = isWindows ? windowsBackend : posixBackend;
@@ -676,7 +733,7 @@ class Stats {
   }
 }
 
-function makeStatsProxy(buf) {
+function makeStatsProxy(path, buf) {
   return new Proxy(new Stats(), {
     has(target, property) {
       return statsHasField(property);
@@ -696,7 +753,7 @@ function makeStatsProxy(buf) {
         default:
           if (property in target)
             return target[property];
-          const value = statsReadField.call(receiver, property);
+          const value = statsReadField.call(receiver, property, path);
           return (value !== null) ? value : undefined;
       }
     },
@@ -720,7 +777,7 @@ function statsHasField(name) {
   return statFields.has(name);
 }
 
-function statsReadField(name) {
+function statsReadField(name, path) {
   let field = getStatSpec().fields[name];
   if (field === undefined) {
     if (name === 'birthtime') {
@@ -739,21 +796,38 @@ function statsReadField(name) {
 
   const read = (typeof type === 'string') ? NativePointer.prototype['read' + type] : type;
 
-  const value = read.call(this.buffer.add(offset));
+  const value = read.call(this.buffer.add(offset), path);
   if (value instanceof Int64 || value instanceof UInt64)
     return value.valueOf();
 
   return value;
 }
 
-function readWindowsFileAttributes() {
-  const FILE_ATTRIBUTE_DIRECTORY = 0x10;
+function readWindowsFileAttributes(path) {
+  const attributes = this.readU32();
+
+  let isLink = false;
+  if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) !== 0) {
+    enumerateWindowsDirectoryEntriesMatching(path, data => {
+      const reserved0 = data.add(36).readU32();
+      isLink = (reserved0 === IO_REPARSE_TAG_MOUNT_POINT || reserved0 === IO_REPARSE_TAG_SYMLINK);
+    });
+  }
+
+  const isDir = (attributes & FILE_ATTRIBUTE_DIRECTORY) !== 0;
 
   let mode;
-  if ((this.readU32() & FILE_ATTRIBUTE_DIRECTORY) !== 0)
-    mode = S_IFDIR | 0x1ed;
+  if (isLink)
+    mode = S_IFLNK;
+  else if (isDir)
+    mode = S_IFDIR;
   else
-    mode |= S_IFREG | 0x1a4;
+    mode = S_IFREG;
+
+  if (isDir)
+    mode |= 0x1ed;
+  else
+    mode |= 0x1a4;
 
   return mode;
 }
@@ -854,10 +928,12 @@ if (isWindows) {
     ['CreateFileW', SF, 'pointer', ['pointer', 'uint', 'uint', 'pointer', 'uint', 'uint', 'pointer']],
     ['DeleteFileW', SF, 'uint', ['pointer']],
     ['RemoveDirectoryW', SF, 'uint', ['pointer']],
+    ['CloseHandle', NF, 'uint', ['pointer']],
     ['FindFirstFileW', SF, 'pointer', ['pointer', 'pointer']],
     ['FindNextFileW', NF, 'uint', ['pointer', 'pointer']],
     ['FindClose', NF, 'uint', ['pointer']],
     ['GetFileAttributesExW', SF, 'uint', ['pointer', 'uint', 'pointer']],
+    ['GetFinalPathNameByHandleW', SF, 'uint', ['pointer', 'pointer', 'uint', 'uint']],
     ['FormatMessageW', NF, 'uint', ['uint', 'pointer', 'uint', 'uint', 'pointer', 'uint', 'pointer']],
   ];
 } else {
