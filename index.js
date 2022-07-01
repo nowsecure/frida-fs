@@ -508,6 +508,22 @@ const posixBackend = {
   },
 };
 
+function writeFileSync(path, data, options = {}) {
+  if (typeof options === 'string')
+    options = { encoding: options };
+  const {encoding = null} = options;
+
+  if (typeof data === 'string' && encoding !== null && !encodingIsUtf8(encoding))
+    data = Buffer.from(data, encoding);
+
+  const file = new File(path, 'wb');
+  try {
+    file.write(data);
+  } finally {
+    file.close();
+  }
+}
+
 function performStatPosix(impl, path) {
   const buf = Memory.alloc(statBufSize);
   const result = impl(Memory.allocUtf8String(path), buf);
@@ -517,7 +533,7 @@ function performStatPosix(impl, path) {
 }
 
 function parseReadFileResult(buf, fileSize, encoding) {
-  if (encoding === 'utf8')
+  if (encodingIsUtf8(encoding))
     return buf.readUtf8String(fileSize);
 
   const value = Buffer.from(buf.readByteArray(fileSize));
@@ -525,6 +541,10 @@ function parseReadFileResult(buf, fileSize, encoding) {
     return value.toString(encoding);
 
   return value;
+}
+
+function encodingIsUtf8(encoding) {
+  return encoding === 'utf8' || encoding === 'utf-8';
 }
 
 const backend = isWindows ? windowsBackend : posixBackend;
@@ -1085,6 +1105,7 @@ export function createWriteStream(path) {
 
 export const readdir = callbackify(readdirSync);
 export const readFile = callbackify(readFileSync);
+export const writeFile = callbackify(writeFileSync);
 export const readlink = callbackify(readlinkSync);
 export const rmdir = callbackify(rmdirSync);
 export const unlink = callbackify(unlinkSync);
@@ -1096,6 +1117,7 @@ export {
   readdirSync,
   list,
   readFileSync,
+  writeFileSync,
   readlinkSync,
   rmdirSync,
   unlinkSync,
@@ -1113,6 +1135,8 @@ export default {
   list,
   readFile,
   readFileSync,
+  writeFile,
+  writeFileSync,
   readlink,
   readlinkSync,
   rmdir,
