@@ -15,7 +15,9 @@ const S_IFIFO = 0x1000;
 const S_IFLNK = 0xa000;
 const S_IFSOCK = 0xc000;
 
-const universalConstants = {
+type ApiConstants = Record<string, number>;
+
+const universalConstants: ApiConstants = {
   S_IFMT,
   S_IFREG,
   S_IFDIR,
@@ -48,7 +50,7 @@ const universalConstants = {
   DT_SOCK: 12,
   DT_WHT: 14,
 };
-const platformConstants = {
+const platformConstants: Partial<Record<Platform, ApiConstants>> = {
   darwin: {
     O_RDONLY: 0x0,
     O_WRONLY: 0x1,
@@ -83,7 +85,10 @@ const platformConstants = {
     O_NONBLOCK: 0x800,
   },
 };
-const constants = Object.assign({}, universalConstants, platformConstants[platform] || {});
+const constants = {
+  ...universalConstants,
+  ...platformConstants[platform]
+};
 
 const INVALID_HANDLE_VALUE = ptr(-1);
 
@@ -117,13 +122,13 @@ const SEEK_END = 2;
 const EINTR = 4;
 
 class ReadStream extends stream.Readable {
-  constructor(path) {
+  #input: InputStream | null = null;
+  #readRequest: Promise<void> | null = null;
+
+  constructor(path: string) {
     super({
       highWaterMark: 4 * 1024 * 1024
     });
-
-    this._input = null;
-    this._readRequest = null;
 
     const api = getApi();
 
@@ -145,7 +150,7 @@ class ReadStream extends stream.Readable {
         return;
       }
 
-      this._input = new Win32InputStream(handle, { autoClose: true });
+      this.#input = new Win32InputStream(handle, { autoClose: true });
     } else {
       const result = api.open(Memory.allocUtf8String(path), constants.O_RDONLY, 0);
 
@@ -157,26 +162,24 @@ class ReadStream extends stream.Readable {
         return;
       }
 
-      this._input = new UnixInputStream(fd, { autoClose: true });
+      this.#input = new UnixInputStream(fd, { autoClose: true });
     }
   }
 
-  _destroy(err, callback) {
-    if (this._input !== null) {
-      this._input.close();
-      this._input = null;
-    }
+  _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    this.#input?.close();
+    this.#input = null;
 
-    callback(err);
+    callback(error);
   }
 
-  _read(size) {
-    if (this._readRequest !== null)
+  _read(size: number): void {
+    if (this.#readRequest !== null)
       return;
 
-    this._readRequest = this._input.read(size)
+    this.#readRequest = this.#input!.read(size)
     .then(buffer => {
-      this._readRequest = null;
+      this.#readRequest = null;
 
       if (buffer.byteLength === 0) {
         this.push(null);
@@ -187,20 +190,20 @@ class ReadStream extends stream.Readable {
         this._read(size);
     })
     .catch(error => {
-      this._readRequest = null;
+      this.#readRequest = null;
       this.destroy(error);
     });
   }
 }
 
 class WriteStream extends stream.Writable {
-  constructor(path) {
+  #output: OutputStream | null = null;
+  #writeRequest: Promise<void> | null = null;
+
+  constructor(path: string) {
     super({
       highWaterMark: 4 * 1024 * 1024
     });
-
-    this._output = null;
-    this._writeRequest = null;
 
     const api = getApi();
 
@@ -222,7 +225,7 @@ class WriteStream extends stream.Writable {
         return;
       }
 
-      this._output = new Win32OutputStream(handle, { autoClose: true });
+      this.#output = new Win32OutputStream(handle, { autoClose: true });
     } else {
       const pathStr = Memory.allocUtf8String(path);
       const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC;
@@ -237,43 +240,51 @@ class WriteStream extends stream.Writable {
         return;
       }
 
-      this._output = new UnixOutputStream(fd, { autoClose: true });
+      this.#output = new UnixOutputStream(fd, { autoClose: true });
     }
   }
 
-  _destroy(err, callback) {
-    if (this._output !== null) {
-      this._output.close();
-      this._output = null;
-    }
+  _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    this.#output?.close();
+    this.#output = null;
 
-    callback(err);
+    callback(error);
   }
 
-  _write(chunk, encoding, callback) {
-    if (this._writeRequest !== null)
+  _write(chunk: any, encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    if (this.#writeRequest !== null)
       return;
 
-    this._writeRequest = this._output.writeAll(chunk)
+    this.#writeRequest = this.#output!.writeAll(chunk)
     .then(size => {
-      this._writeRequest = null;
+      this.#writeRequest = null;
 
       callback();
     })
     .catch(error => {
-      this._writeRequest = null;
+      this.#writeRequest = null;
 
       callback(error);
     });
   }
 }
 
-const windowsBackend = {
-  enumerateDirectoryEntries(path, callback) {
+interface PlatformBackend {
+  enumerateDirectoryEntries(path: string, callback: (entry: NativePointer) => void): void;
+  readFileSync(path: string, options?: ReadFileOptions): string | Buffer;
+  readlinkSync(path: string): string;
+  rmdirSync(path: string): void;
+  unlinkSync(path: string): void;
+  statSync(path: string): Stats;
+  lstatSync(path: string): Stats;
+}
+
+const windowsBackend: PlatformBackend = {
+  enumerateDirectoryEntries(path: string, callback: (entry: NativePointer) => void): void {
     enumerateWindowsDirectoryEntriesMatching(path + '\\*', callback);
   },
 
-  readFileSync(path, options = {}) {
+  readFileSync(path: string, options: ReadFileOptions = {}): string | Buffer {
     if (typeof options === 'string')
       options = { encoding: options };
     const {encoding = null} = options;
@@ -318,7 +329,7 @@ const windowsBackend = {
     }
   },
 
-  readlinkSync(path) {
+  readlinkSync(path: string): string {
     const {CreateFileW, GetFinalPathNameByHandleW, CloseHandle} = getApi();
 
     const createRes = CreateFileW(
@@ -346,26 +357,26 @@ const windowsBackend = {
           continue;
         }
 
-        return buf.readUtf16String().substring(4);
+        return buf.readUtf16String()!.substring(4);
       }
     } finally {
       CloseHandle(handle);
     }
   },
 
-  rmdirSync(path) {
+  rmdirSync(path: string): void {
     const result = getApi().RemoveDirectoryW(Memory.allocUtf16String(path));
     if (result.value === 0)
       throwWindowsError(result.lastError);
   },
 
-  unlinkSync(path) {
+  unlinkSync(path: string): void {
     const result = getApi().DeleteFileW(Memory.allocUtf16String(path));
     if (result.value === 0)
       throwWindowsError(result.lastError);
   },
 
-  statSync(path) {
+  statSync(path: string): Stats {
     const s = windowsBackend.lstatSync(path);
     if (!s.isSymbolicLink())
       return s;
@@ -374,18 +385,18 @@ const windowsBackend = {
     return windowsBackend.lstatSync(target);
   },
 
-  lstatSync(path) {
+  lstatSync(path: string): Stats {
     const getFileExInfoStandard = 0;
     const buf = Memory.alloc(36);
     const result = getApi().GetFileAttributesExW(Memory.allocUtf16String(path), getFileExInfoStandard, buf);
     if (result.value === 0) {
       if (result.lastError === ERROR_SHARING_VIOLATION) {
-        let fileAttrData = null;
+        let fileAttrData: NativePointer;
         enumerateWindowsDirectoryEntriesMatching(path, data => {
           // WIN32_FIND_DATAW starts with the exact same fields as WIN32_FILE_ATTRIBUTE_DATA
           fileAttrData = Memory.dup(data, 36);
         });
-        return makeStatsProxy(path, fileAttrData);
+        return makeStatsProxy(path, fileAttrData!);
       }
       throwWindowsError(result.lastError);
     }
@@ -393,7 +404,7 @@ const windowsBackend = {
   },
 };
 
-function enumerateWindowsDirectoryEntriesMatching(filename, callback) {
+function enumerateWindowsDirectoryEntriesMatching(filename: string, callback: (entry: NativePointer) => void): void {
   const {FindFirstFileW, FindNextFileW, FindClose} = getApi();
 
   const data = Memory.alloc(592);
@@ -412,8 +423,8 @@ function enumerateWindowsDirectoryEntriesMatching(filename, callback) {
   }
 }
 
-const posixBackend = {
-  enumerateDirectoryEntries(path, callback) {
+const posixBackend: PlatformBackend = {
+  enumerateDirectoryEntries(path: string, callback: (entry: NativePointer) => void): void {
     const {opendir, opendir$INODE64, closedir, readdir, readdir$INODE64} = getApi();
 
     const opendirImpl = opendir$INODE64 || opendir;
@@ -434,7 +445,7 @@ const posixBackend = {
     }
   },
 
-  readFileSync(path, options = {}) {
+  readFileSync(path: string, options: ReadFileOptions = {}): string | Buffer {
     if (typeof options === 'string')
       options = { encoding: options };
     const {encoding = null} = options;
@@ -471,7 +482,7 @@ const posixBackend = {
     }
   },
 
-  readlinkSync(path) {
+  readlinkSync(path: string): string {
     const api = getApi();
 
     const pathStr = Memory.allocUtf8String(path);
@@ -484,47 +495,59 @@ const posixBackend = {
     if (n === -1)
       throwPosixError(result.errno);
 
-    return buf.readUtf8String(n);
+    return buf.readUtf8String(n)!;
   },
 
-  rmdirSync(path) {
+  rmdirSync(path: string): void {
     const result = getApi().rmdir(Memory.allocUtf8String(path));
     if (result.value === -1)
       throwPosixError(result.errno);
   },
 
-  unlinkSync(path) {
+  unlinkSync(path: string): void {
     const result = getApi().unlink(Memory.allocUtf8String(path));
     if (result.value === -1)
       throwPosixError(result.errno);
   },
 
-  statSync(path) {
-    return performStatPosix(getStatSpec()._stat, path);
+  statSync(path: string): Stats {
+    return performStatPosix(getStatSpec()._stat!, path);
   },
 
-  lstatSync(path) {
-    return performStatPosix(getStatSpec()._lstat, path);
+  lstatSync(path: string): Stats {
+    return performStatPosix(getStatSpec()._lstat!, path);
   },
 };
 
-function writeFileSync(path, data, options = {}) {
+function writeFileSync(path: string, data: string | NodeJS.ArrayBufferView, options: WriteFileOptions = {}): void {
   if (typeof options === 'string')
     options = { encoding: options };
   const {encoding = null} = options;
 
-  if (typeof data === 'string' && encoding !== null && !encodingIsUtf8(encoding))
-    data = Buffer.from(data, encoding);
+  let rawData: string | ArrayBuffer;
+  if (typeof data === 'string') {
+    if (encoding !== null && !encodingIsUtf8(encoding))
+      rawData = Buffer.from(data, encoding).buffer as ArrayBuffer;
+    else
+      rawData = data;
+  } else {
+    rawData = data.buffer as ArrayBuffer;
+  }
 
   const file = new File(path, 'wb');
   try {
-    file.write(data);
+    file.write(rawData);
   } finally {
     file.close();
   }
 }
 
-function performStatPosix(impl, path) {
+type ReadFileOptions = BufferEncoding | { encoding?: BufferEncoding };
+type WriteFileOptions = BufferEncoding | { encoding?: BufferEncoding };
+
+type PosixStatImpl = (path: NativePointer, buf: NativePointer) => UnixSystemFunctionResult<number>;
+
+function performStatPosix(impl: PosixStatImpl, path: string): Stats {
   const buf = Memory.alloc(statBufSize);
   const result = impl(Memory.allocUtf8String(path), buf);
   if (result.value !== 0)
@@ -532,22 +555,22 @@ function performStatPosix(impl, path) {
   return makeStatsProxy(path, buf);
 }
 
-function parseReadFileResult(buf, fileSize, encoding) {
+function parseReadFileResult(buf: NativePointer, fileSize: number, encoding: BufferEncoding | null): string | Buffer {
   if (encodingIsUtf8(encoding))
-    return buf.readUtf8String(fileSize);
+    return buf.readUtf8String(fileSize)!;
 
-  const value = Buffer.from(buf.readByteArray(fileSize));
+  const value = Buffer.from(buf.readByteArray(fileSize)!);
   if (encoding !== null)
     return value.toString(encoding);
 
   return value;
 }
 
-function encodingIsUtf8(encoding) {
+function encodingIsUtf8(encoding: string | null): boolean {
   return encoding === 'utf8' || encoding === 'utf-8';
 }
 
-const backend = isWindows ? windowsBackend : posixBackend;
+const backend: PlatformBackend = isWindows ? windowsBackend : posixBackend;
 
 const {
   enumerateDirectoryEntries,
@@ -559,7 +582,17 @@ const {
   lstatSync,
 } = backend;
 
-const direntSpecs = {
+interface DirentSpec {
+  d_name: DirentFieldSpec<string>;
+  d_type: DirentFieldSpec<number>;
+}
+
+type DirentFieldSpec<T> = [
+  offset: number,
+  read: 'Utf8String' | 'Utf16String' | 'U8' | ((this: NativePointer, path?: string) => T)
+];
+
+const direntSpecs: { [abi: string]: DirentSpec } = {
   'windows': {
     'd_name': [44, 'Utf16String'],
     'd_type': [0, readWindowsFileAttributes],
@@ -588,8 +621,8 @@ const direntSpecs = {
 
 const direntSpec = isWindows ? direntSpecs.windows : direntSpecs[`${platform}-${pointerSize * 8}`];
 
-function readdirSync(path) {
-  const entries = [];
+function readdirSync(path: string): string[] {
+  const entries: string[] = [];
   enumerateDirectoryEntries(path, entry => {
     const name = readDirentField(entry, 'd_name');
     entries.push(name);
@@ -597,15 +630,15 @@ function readdirSync(path) {
   return entries;
 }
 
-function list(path) {
+function list(path: string): DirectoryEntry[] {
   const extraFieldNames = Object.keys(direntSpec).filter(k => !k.startsWith('d_'));
 
-  const entries = [];
+  const entries: DirectoryEntry = [];
   enumerateDirectoryEntries(path, entry => {
     const name = readDirentField(entry, 'd_name');
     const type = readDirentField(entry, 'd_type', fsPath.join(path, name));
 
-    const extras = {};
+    const extras: Partial<DirectoryEntry> = {};
     for (const f of extraFieldNames)
       extras[f] = readDirentField(entry, f);
 
@@ -616,6 +649,15 @@ function list(path) {
     });
   });
   return entries;
+}
+
+export interface DirectoryEntry {
+  name: string;
+  type: number;
+  atime?: Date;
+  mtime?: Date;
+  ctime?: Date;
+  size?: number;
 }
 
 function readDirentField(entry, name, ...args) {
@@ -629,6 +671,34 @@ function readDirentField(entry, name, ...args) {
 
   return value;
 }
+
+interface StatSpec {
+  size: number;
+
+  fields: {
+    dev: StatFieldSpec<number>;
+    mode: StatFieldSpec<number>;
+    nlink: StatFieldSpec<number>;
+    ino: StatFieldSpec<number>;
+    uid: StatFieldSpec<number>;
+    gid: StatFieldSpec<number>;
+    rdev: StatFieldSpec<number>;
+    atime: StatFieldSpec<Date>;
+    mtime: StatFieldSpec<Date>;
+    ctime: StatFieldSpec<Date>;
+    size: StatFieldSpec<number | UInt64>;
+    blocks: StatFieldSpec<number | UInt64>;
+    blksize: StatFieldSpec<number>;
+  };
+
+  _stat?: PosixStatImpl;
+  _lstat?: PosixStatImpl;
+}
+
+type StatFieldSpec<T> = [
+  offset: number,
+  read: 'U16' | 'S32' | 'U32' | 'S64' | 'U64' | ((this: NativePointer, path: string) => T)
+];
 
 const statFields = new Set([
   'dev',
@@ -650,7 +720,7 @@ const statFields = new Set([
   'ctime',
   'birthtime',
 ]);
-const statSpecs = {
+const statSpecs: { [abi: string]: StatSpec } = {
   'windows': {
     size: 36,
     fields: {
@@ -762,10 +832,10 @@ const statSpecs = {
     },
   },
 };
-let cachedStatSpec = null;
+let cachedStatSpec: StatSpec | null = null;
 const statBufSize = 256;
 
-function getStatSpec() {
+function getStatSpec(): StatSpec {
   if (cachedStatSpec !== null)
     return cachedStatSpec;
 
@@ -796,6 +866,27 @@ function getStatSpec() {
 }
 
 class Stats {
+  dev!: number;
+  mode!: number;
+  nlink!: number;
+  uid!: number;
+  gid!: number;
+  rdev!: number;
+  blksize!: number;
+  ino!: number;
+  size!: number;
+  blocks!: number;
+  atimeMs!: number;
+  mtimeMs!: number;
+  ctimeMs!: number;
+  birthtimeMs!: number;
+  atime!: Date;
+  mtime!: Date;
+  ctime!: Date;
+  birthtime!: Date;
+
+  buffer!: NativePointer;
+
   isFile() {
     return (this.mode & S_IFMT) === S_IFREG;
   }
@@ -825,7 +916,7 @@ class Stats {
   }
 }
 
-function makeStatsProxy(path, buf) {
+function makeStatsProxy(path: string, buf: NativePointer): Stats {
   return new Proxy(new Stats(), {
     has(target, property) {
       return statsHasField(property);
@@ -833,6 +924,7 @@ function makeStatsProxy(path, buf) {
     get(target, property, receiver) {
       switch (property) {
         case 'prototype':
+          return undefined;
         case 'constructor':
         case 'toString':
           return target[property];
@@ -865,20 +957,20 @@ function makeStatsProxy(path, buf) {
   });
 }
 
-function statsHasField(name) {
+function statsHasField(name: string): boolean {
   return statFields.has(name);
 }
 
-function statsReadField(name, path) {
-  let field = getStatSpec().fields[name];
+function statsReadField<T>(this: Stats, name: string, path: string): number | UInt64 | Date | undefined {
+  let field: StatFieldSpec<T> | undefined = getStatSpec().fields[name];
   if (field === undefined) {
     if (name === 'birthtime') {
-      return statsReadField.call(this, 'ctime');
+      return statsReadField.call(this, 'ctime', path);
     }
 
     const msPos = name.lastIndexOf('Ms');
     if (msPos === name.length - 2) {
-      return statsReadField.call(this, name.substr(0, msPos)).getTime();
+      return (statsReadField.call(this, name.substring(0, msPos), path) as Date).getTime();
     }
 
     return undefined;
@@ -895,12 +987,12 @@ function statsReadField(name, path) {
   return value;
 }
 
-function readWindowsFileAttributes(path) {
+function readWindowsFileAttributes(this: NativePointer, path?: string): number {
   const attributes = this.readU32();
 
   let isLink = false;
   if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) !== 0) {
-    enumerateWindowsDirectoryEntriesMatching(path, data => {
+    enumerateWindowsDirectoryEntriesMatching(path!, data => {
       const reserved0 = data.add(36).readU32();
       isLink = (reserved0 === IO_REPARSE_TAG_MOUNT_POINT || reserved0 === IO_REPARSE_TAG_SYMLINK);
     });
@@ -924,28 +1016,28 @@ function readWindowsFileAttributes(path) {
   return mode;
 }
 
-function readWindowsFileTime() {
+function readWindowsFileTime(this: NativePointer): Date {
   const fileTime = BigInt(this.readU64().toString()).valueOf();
   const ticksPerMsec = 10000n;
   const msecToUnixEpoch = 11644473600000n;
   const unixTime = (fileTime / ticksPerMsec) - msecToUnixEpoch;
-  return new Date(parseInt(unixTime));
+  return new Date(parseInt(unixTime.toString()));
 }
 
-function readWindowsFileSize() {
+function readWindowsFileSize(this: NativePointer): UInt64 {
   const high = this.readU32();
   const low = this.add(4).readU32();
   return uint64(high).shl(32).or(low);
 }
 
-function readTimespec32() {
+function readTimespec32(this: NativePointer): Date {
   const sec = this.readU32();
   const nsec = this.add(4).readU32();
   const msec = nsec / 1000000;
   return new Date((sec * 1000) + msec);
 }
 
-function readTimespec64() {
+function readTimespec64(this: NativePointer): Date {
   // FIXME: Improve UInt64 to support division
   const sec = this.readU64().valueOf();
   const nsec = this.add(8).readU64().valueOf();
@@ -953,23 +1045,23 @@ function readTimespec64() {
   return new Date((sec * 1000) + msec);
 }
 
-function returnZero() {
+function returnZero(): number {
   return 0;
 }
 
-function returnOne() {
+function returnOne(): number {
   return 1;
 }
 
-function throwWindowsError(lastError) {
+function throwWindowsError(lastError: number): never {
   throw makeWindowsError(lastError);
 }
 
-function throwPosixError(errno) {
+function throwPosixError(errno: number): never {
   throw makePosixError(errno);
 }
 
-function makeWindowsError(lastError) {
+function makeWindowsError(lastError: number): Error {
   const maxLength = 256;
 
   const FORMAT_MESSAGE_FROM_SYSTEM = 0x00001000;
@@ -979,15 +1071,17 @@ function makeWindowsError(lastError) {
   getApi().FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
       NULL, lastError, 0, buf, maxLength, NULL);
 
-  return new Error(buf.readUtf16String());
+  return new Error(buf.readUtf16String()!);
 }
 
-function makePosixError(errno) {
+function makePosixError(errno: number): Error {
   const message = getApi().strerror(errno).readUtf8String();
   return new Error(message);
 }
 
-function callbackify(original) {
+type ApiFunc = (...args: any[]) => any;
+
+function callbackify(original: ApiFunc): ApiFunc {
   return function (...args) {
     const numArgsMinusOne = args.length - 1;
 
