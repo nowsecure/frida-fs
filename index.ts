@@ -3,6 +3,9 @@ import fsPath from "path";
 import process from "process";
 import stream from "stream";
 
+const getWindowsApi = memoize(_getWindowsApi);
+const getPosixApi = memoize(_getPosixApi);
+
 const { platform, pointerSize } = Process;
 const isWindows = platform === "windows";
 
@@ -131,7 +134,7 @@ class ReadStream extends stream.Readable {
         });
 
         if (isWindows) {
-            const api = getApi<WindowsApi>();
+            const api = getWindowsApi();
 
             const result = api.CreateFileW(
                 Memory.allocUtf16String(path),
@@ -152,7 +155,7 @@ class ReadStream extends stream.Readable {
 
             this.#input = new Win32InputStream(handle, { autoClose: true });
         } else {
-            const api = getApi<PosixApi>();
+            const api = getPosixApi();
 
             const result = api.open(Memory.allocUtf8String(path), constants.O_RDONLY, 0);
 
@@ -208,7 +211,7 @@ class WriteStream extends stream.Writable {
         });
 
         if (isWindows) {
-            const api = getApi<WindowsApi>();
+            const api = getWindowsApi();
 
             const result = api.CreateFileW(
                 Memory.allocUtf16String(path),
@@ -229,7 +232,7 @@ class WriteStream extends stream.Writable {
 
             this.#output = new Win32OutputStream(handle, { autoClose: true });
         } else {
-            const api = getApi<PosixApi>();
+            const api = getPosixApi();
 
             const pathStr = Memory.allocUtf8String(path);
             const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC;
@@ -293,7 +296,7 @@ const windowsBackend: PlatformBackend = {
             options = { encoding: options };
         const { encoding = null } = options;
 
-        const { CreateFileW, GetFileSizeEx, ReadFile, CloseHandle } = getApi();
+        const { CreateFileW, GetFileSizeEx, ReadFile, CloseHandle } = getWindowsApi();
 
         const createRes = CreateFileW(
             Memory.allocUtf16String(path),
@@ -334,7 +337,7 @@ const windowsBackend: PlatformBackend = {
     },
 
     readlinkSync(path: string): string {
-        const { CreateFileW, GetFinalPathNameByHandleW, CloseHandle } = getApi();
+        const { CreateFileW, GetFinalPathNameByHandleW, CloseHandle } = getWindowsApi();
 
         const createRes = CreateFileW(
             Memory.allocUtf16String(path),
@@ -369,13 +372,13 @@ const windowsBackend: PlatformBackend = {
     },
 
     rmdirSync(path: string): void {
-        const result = getApi<WindowsApi>().RemoveDirectoryW(Memory.allocUtf16String(path));
+        const result = getWindowsApi().RemoveDirectoryW(Memory.allocUtf16String(path));
         if (result.value === 0)
             throwWindowsError(result.lastError);
     },
 
     unlinkSync(path: string): void {
-        const result = getApi<WindowsApi>().DeleteFileW(Memory.allocUtf16String(path));
+        const result = getWindowsApi().DeleteFileW(Memory.allocUtf16String(path));
         if (result.value === 0)
             throwWindowsError(result.lastError);
     },
@@ -392,7 +395,7 @@ const windowsBackend: PlatformBackend = {
     lstatSync(path: string): Stats {
         const getFileExInfoStandard = 0;
         const buf = Memory.alloc(36);
-        const result = getApi<WindowsApi>().GetFileAttributesExW(Memory.allocUtf16String(path), getFileExInfoStandard, buf);
+        const result = getWindowsApi().GetFileAttributesExW(Memory.allocUtf16String(path), getFileExInfoStandard, buf);
         if (result.value === 0) {
             if (result.lastError === ERROR_SHARING_VIOLATION) {
                 let fileAttrData: NativePointer;
@@ -409,7 +412,7 @@ const windowsBackend: PlatformBackend = {
 };
 
 function enumerateWindowsDirectoryEntriesMatching(filename: string, callback: (entry: NativePointer) => void): void {
-    const { FindFirstFileW, FindNextFileW, FindClose } = getApi();
+    const { FindFirstFileW, FindNextFileW, FindClose } = getWindowsApi();
 
     const data = Memory.alloc(592);
 
@@ -429,7 +432,7 @@ function enumerateWindowsDirectoryEntriesMatching(filename: string, callback: (e
 
 const posixBackend: PlatformBackend = {
     enumerateDirectoryEntries(path: string, callback: (entry: NativePointer) => void): void {
-        const { opendir, opendir$INODE64, closedir, readdir, readdir$INODE64 } = getApi();
+        const { opendir, opendir$INODE64, closedir, readdir, readdir$INODE64 } = getPosixApi();
 
         const opendirImpl = opendir$INODE64 || opendir;
         const readdirImpl = readdir$INODE64 || readdir;
@@ -454,7 +457,7 @@ const posixBackend: PlatformBackend = {
             options = { encoding: options };
         const { encoding = null } = options;
 
-        const { open, close, lseek, read } = getApi();
+        const { open, close, lseek, read } = getPosixApi();
 
         const openResult = open(Memory.allocUtf8String(path), constants.O_RDONLY, 0);
         const fd = openResult.value;
@@ -492,7 +495,7 @@ const posixBackend: PlatformBackend = {
         const linkSize = posixBackend.lstatSync(path).size.valueOf();
         const buf = Memory.alloc(linkSize);
 
-        const result = getApi<PosixApi>().readlink(pathStr, buf, linkSize);
+        const result = getPosixApi().readlink(pathStr, buf, linkSize);
         const n = result.value.valueOf();
         if (n === -1)
             throwPosixError(result.errno);
@@ -501,13 +504,13 @@ const posixBackend: PlatformBackend = {
     },
 
     rmdirSync(path: string): void {
-        const result = getApi<PosixApi>().rmdir(Memory.allocUtf8String(path));
+        const result = getPosixApi().rmdir(Memory.allocUtf8String(path));
         if (result.value === -1)
             throwPosixError(result.errno);
     },
 
     unlinkSync(path: string): void {
-        const result = getApi<PosixApi>().unlink(Memory.allocUtf8String(path));
+        const result = getPosixApi().unlink(Memory.allocUtf8String(path));
         if (result.value === -1)
             throwPosixError(result.errno);
     },
@@ -855,7 +858,7 @@ function getStatSpec(): StatSpec {
     if (isWindows) {
         statSpec = statSpecs.windows;
     } else {
-        const api = getApi<PosixApi>();
+        const api = getPosixApi();
         const stat64Impl = api.stat64 ?? api.__xstat64;
 
         let platformId = `${platform}-${pointerSize * 8}`;
@@ -1081,14 +1084,14 @@ function makeWindowsError(lastError: number): Error {
     const FORMAT_MESSAGE_IGNORE_INSERTS = 0x00000200;
 
     const buf = Memory.alloc(maxLength * 2);
-    getApi<WindowsApi>().FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+    getWindowsApi().FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
         NULL, lastError, 0, buf, maxLength, NULL);
 
     return new Error(buf.readUtf16String()!);
 }
 
 function makePosixError(errno: number): Error {
-    const message = getApi<PosixApi>().strerror(errno).readUtf8String()!;
+    const message = getPosixApi().strerror(errno).readUtf8String()!;
     return new Error(message);
 }
 
@@ -1112,69 +1115,49 @@ function callbackify(original: ApiFunc): ApiFunc {
     };
 }
 
-type Api = WindowsApi | PosixApi;
+const SF = SystemFunction;
+const NF = NativeFunction;
+
+const ssizeType = (pointerSize === 8) ? "int64" : "int32";
+const sizeType = "u" + ssizeType;
+const offsetType = (platform === "darwin" || pointerSize === 8) ? "int64" : "int32";
 
 interface WindowsApi {
-    CreateFileW(
-        fileName: NativePointerValue,
-        desiredAccess: number,
-        shareMode: number,
-        securityAttributes: NativePointerValue,
-        creationDisposition: number,
-        flagsAndAttributes: number,
-        templateFile: NativePointerValue)
+    CreateFileW(fileName: NativePointerValue, desiredAccess: number, shareMode: number, securityAttributes: NativePointerValue,
+        creationDisposition: number, flagsAndAttributes: number, templateFile: NativePointerValue)
         : WindowsSystemFunctionResult<NativePointer>;
-    DeleteFileW(
-        fileName: NativePointerValue)
+    DeleteFileW(fileName: NativePointerValue): WindowsSystemFunctionResult<number>;
+    GetFileSizeEx(file: NativePointerValue, fileSize: NativePointerValue): WindowsSystemFunctionResult<number>;
+    ReadFile(file: NativePointerValue, buffer: NativePointerValue, numberOfBytesToRead: number, numberOfBytesRead: NativePointerValue,
+        overlapped: NativePointerValue): WindowsSystemFunctionResult<number>;
+    RemoveDirectoryW(pathName: NativePointerValue): WindowsSystemFunctionResult<number>;
+    CloseHandle(object: NativePointerValue): number;
+    FindFirstFileW(fileName: NativePointerValue, findFileData: NativePointerValue): WindowsSystemFunctionResult<NativePointer>;
+    FindNextFileW(findFile: NativePointerValue, findFileData: NativePointerValue): number;
+    FindClose(findFile: NativePointerValue): number;
+    GetFileAttributesExW(fileName: NativePointerValue, infoLevelId: number, fileInformation: NativePointerValue)
         : WindowsSystemFunctionResult<number>;
-    GetFileSizeEx(
-        file: NativePointerValue,
-        fileSize: NativePointerValue)
+    GetFinalPathNameByHandleW(file: NativePointerValue, filePathBuf: NativePointerValue, filePathLen: number, flags: number)
         : WindowsSystemFunctionResult<number>;
-    ReadFile(
-        file: NativePointerValue,
-        buffer: NativePointerValue,
-        numberOfBytesToRead: number,
-        numberOfBytesRead: NativePointerValue,
-        overlapped: NativePointerValue)
-        : WindowsSystemFunctionResult<number>;
-    RemoveDirectoryW(
-        pathName: NativePointerValue)
-        : WindowsSystemFunctionResult<number>;
-    CloseHandle(
-        object: NativePointerValue)
-        : number;
-    FindFirstFileW(
-        fileName: NativePointerValue,
-        findFileData: NativePointerValue)
-        : WindowsSystemFunctionResult<NativePointer>;
-    FindNextFileW(
-        findFile: NativePointerValue,
-        findFileData: NativePointerValue)
-        : number;
-    FindClose(
-        findFile: NativePointerValue)
-        : number;
-    GetFileAttributesExW(
-        fileName: NativePointerValue,
-        infoLevelId: number,
-        fileInformation: NativePointerValue)
-        : WindowsSystemFunctionResult<number>;
-    GetFinalPathNameByHandleW(
-        file: NativePointerValue,
-        filePathBuf: NativePointerValue,
-        filePathLen: number,
-        flags: number)
-        : WindowsSystemFunctionResult<number>;
-    FormatMessageW(
-        flags: number,
-        source: NativePointerValue,
-        messageId: number,
-        languageId: number,
-        buffer: NativePointerValue,
-        size: number,
-        args: NativePointerValue)
-        : number;
+    FormatMessageW(flags: number, source: NativePointerValue, messageId: number, languageId: number, buffer: NativePointerValue,
+        size: number, args: NativePointerValue): number;
+}
+
+function _getWindowsApi(): WindowsApi {
+    return makeApi<WindowsApi>([
+        ["CreateFileW", SF, "pointer", ["pointer", "uint", "uint", "pointer", "uint", "uint", "pointer"]],
+        ["DeleteFileW", SF, "uint", ["pointer"]],
+        ["GetFileSizeEx", SF, "uint", ["pointer", "pointer"]],
+        ["ReadFile", SF, "uint", ["pointer", "pointer", "uint", "pointer", "pointer"]],
+        ["RemoveDirectoryW", SF, "uint", ["pointer"]],
+        ["CloseHandle", NF, "uint", ["pointer"]],
+        ["FindFirstFileW", SF, "pointer", ["pointer", "pointer"]],
+        ["FindNextFileW", NF, "uint", ["pointer", "pointer"]],
+        ["FindClose", NF, "uint", ["pointer"]],
+        ["GetFileAttributesExW", SF, "uint", ["pointer", "uint", "pointer"]],
+        ["GetFinalPathNameByHandleW", SF, "uint", ["pointer", "pointer", "uint", "uint"]],
+        ["FormatMessageW", NF, "uint", ["uint", "pointer", "uint", "uint", "pointer", "uint", "pointer"]],
+    ]);
 }
 
 interface PosixApi {
@@ -1199,49 +1182,8 @@ interface PosixApi {
     strerror(errnum: number): NativePointer;
 }
 
-const SF = SystemFunction;
-const NF = NativeFunction;
-
-const nativeOpts = (isWindows && pointerSize === 4) ? { abi: "stdcall" } : {};
-
-const ssizeType = (pointerSize === 8) ? "int64" : "int32";
-const sizeType = "u" + ssizeType;
-const offsetType = (platform === "darwin" || pointerSize === 8) ? "int64" : "int32";
-
-type ApiSpec = ApiSpecEntry[];
-type ApiSpecEntry = DirectApiSpecEntry | WrappedApiSpecEntry;
-type DirectApiSpecEntry = [
-    name: string,
-    ctor: SystemFunctionConstructor | NativeFunctionConstructor,
-    retType: NativeFunctionReturnType,
-    argTypes: NativeFunctionArgumentType[]
-];
-type WrappedApiSpecEntry = [
-    name: string,
-    ctor: SystemFunctionConstructor | NativeFunctionConstructor,
-    retType: NativeFunctionReturnType,
-    argTypes: NativeFunctionArgumentType[],
-    wrapper: (impl: (...args: NativeFunctionArgumentType[]) => NativeFunctionReturnType, ...args: NativeFunctionArgumentType[]) => NativeFunctionReturnType
-];
-
-let apiSpec: ApiSpec;
-if (isWindows) {
-    apiSpec = [
-        ["CreateFileW", SF, "pointer", ["pointer", "uint", "uint", "pointer", "uint", "uint", "pointer"]],
-        ["DeleteFileW", SF, "uint", ["pointer"]],
-        ["GetFileSizeEx", SF, "uint", ["pointer", "pointer"]],
-        ["ReadFile", SF, "uint", ["pointer", "pointer", "uint", "pointer", "pointer"]],
-        ["RemoveDirectoryW", SF, "uint", ["pointer"]],
-        ["CloseHandle", NF, "uint", ["pointer"]],
-        ["FindFirstFileW", SF, "pointer", ["pointer", "pointer"]],
-        ["FindNextFileW", NF, "uint", ["pointer", "pointer"]],
-        ["FindClose", NF, "uint", ["pointer"]],
-        ["GetFileAttributesExW", SF, "uint", ["pointer", "uint", "pointer"]],
-        ["GetFinalPathNameByHandleW", SF, "uint", ["pointer", "pointer", "uint", "uint"]],
-        ["FormatMessageW", NF, "uint", ["uint", "pointer", "uint", "uint", "pointer", "uint", "pointer"]],
-    ];
-} else {
-    apiSpec = [
+function _getPosixApi(): PosixApi {
+    return makeApi<PosixApi>([
         ["open", SF, "int", ["pointer", "int", "...", "int"]],
         ["close", NF, "int", ["int"]],
         ["lseek", NF, offsetType, ["int", offsetType, "int"]],
@@ -1261,7 +1203,7 @@ if (isWindows) {
         ["lstat64", SF, "int", ["pointer", "pointer"]],
         ["__lxstat64", SF, "int", ["int", "pointer", "pointer"], invokeXstat],
         ["strerror", NF, "pointer", ["int"]],
-    ];
+    ]);
 }
 
 function invokeXstat(impl: any, path: string, buf: NativePointerValue): number {
@@ -1269,20 +1211,33 @@ function invokeXstat(impl: any, path: string, buf: NativePointerValue): number {
     return impl(STAT_VER_LINUX, path, buf);
 }
 
-let cachedApi: Api | null = null;
-function getApi<T>() {
-    if (cachedApi === null) {
-        cachedApi = apiSpec.reduce((api, entry) => {
-            addApiPlaceholder(api, entry);
-            return api;
-        }, {} as Api);
-    }
-    return cachedApi as unknown as T;
+type ApiSpec = ApiSpecEntry[];
+type ApiSpecEntry = DirectApiSpecEntry | WrappedApiSpecEntry;
+type DirectApiSpecEntry = [
+    name: string,
+    ctor: SystemFunctionConstructor | NativeFunctionConstructor,
+    retType: NativeFunctionReturnType,
+    argTypes: NativeFunctionArgumentType[]
+];
+type WrappedApiSpecEntry = [
+    name: string,
+    ctor: SystemFunctionConstructor | NativeFunctionConstructor,
+    retType: NativeFunctionReturnType,
+    argTypes: NativeFunctionArgumentType[],
+    wrapper: (...args: any[]) => any,
+];
+
+function makeApi<T>(spec: ApiSpec): T {
+    return spec.reduce((api, entry) => {
+        addApiPlaceholder(api, entry);
+        return api;
+    }, {} as T);
 }
 
-function addApiPlaceholder(api: Api, entry: ApiSpecEntry): void {
-    const [name] = entry;
+const nativeOpts: NativeFunctionOptions = (isWindows && pointerSize === 4) ? { abi: "stdcall" } : {};
 
+function addApiPlaceholder<T>(api: T, entry: ApiSpecEntry): void {
+    const [name] = entry;
     Object.defineProperty(api, name, {
         configurable: true,
         get() {
@@ -1321,6 +1276,22 @@ export const rmdir = callbackify(rmdirSync);
 export const unlink = callbackify(unlinkSync);
 export const stat = callbackify(statSync);
 export const lstat = callbackify(lstatSync);
+
+function memoize<T>(compute: Compute<T>): Compute<T> {
+    let value: T;
+    let computed = false;
+
+    return function (...args) {
+        if (!computed) {
+            value = compute(...args);
+            computed = true;
+        }
+
+        return value;
+    };
+}
+
+type Compute<T> = (...args: any[]) => T;
 
 export {
     constants,
