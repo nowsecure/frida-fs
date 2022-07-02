@@ -1095,10 +1095,14 @@ function makePosixError(errno: number): Error {
     return new Error(message);
 }
 
-type ApiFunc = (...args: any[]) => any;
+type AsyncCallback<T> = (error: Error | null, result?: T) => void;
 
-function callbackify(original: ApiFunc): ApiFunc {
-    return function (...args) {
+function callbackify<
+        F extends (...args: any[]) => any,
+        P extends Parameters<F>,
+        R extends ReturnType<F>
+        >(original: F): (...args: [...P, AsyncCallback<R>]) => void {
+    return function (...args: [...P, AsyncCallback<R>]): void {
         const numArgsMinusOne = args.length - 1;
 
         const implArgs = args.slice(0, numArgsMinusOne);
@@ -1106,10 +1110,10 @@ function callbackify(original: ApiFunc): ApiFunc {
 
         process.nextTick(function () {
             try {
-                const result = original(...implArgs);
+                const result = original(...args);
                 callback(null, result);
             } catch (e) {
-                callback(e);
+                callback(e as Error);
             }
         });
     };
