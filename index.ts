@@ -952,7 +952,7 @@ function makeStatsProxy(path: string, buf: NativePointer): Stats {
                 case "buffer":
                     return buf;
                 default:
-                    if (typeof property === "symbol")
+                    if (typeof property === "symbol" || property in target)
                         return (target as any)[property];
                     return statsReadField.call(receiver, property, path);
             }
