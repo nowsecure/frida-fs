@@ -1110,7 +1110,7 @@ function callbackify<
 
         process.nextTick(function () {
             try {
-                const result = original(...args);
+                const result = original(...implArgs);
                 callback(null, result);
             } catch (e) {
                 callback(e as Error);
