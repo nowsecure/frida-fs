@@ -2,11 +2,17 @@
   "name": "frida-fs",
   "version": "5.1.0",
   "description": "Create a stream from a filesystem resource",
-  "main": "index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "type": "module",
   "files": [
-    "/index.js"
+    "/dist/"
   ],
+  "scripts": {
+    "prepare": "npm run build",
+    "build": "tsc",
+    "watch": "tsc -w"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nowsecure/frida-fs.git"
@@ -15,5 +21,10 @@
   "bugs": {
     "url": "https://github.com/nowsecure/frida-fs/issues"
   },
-  "homepage": "https://github.com/nowsecure/frida-fs#readme"
+  "homepage": "https://github.com/nowsecure/frida-fs#readme",
+  "devDependencies": {
+    "@types/frida-gum": "^18.0.0",
+    "@types/node": "^18.0.0",
+    "typescript": "^4.7.4"
+  }
 }
