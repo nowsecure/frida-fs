@@ -1098,10 +1098,10 @@ function makePosixError(errno: number): Error {
 type AsyncCallback<T> = (error: Error | null, result?: T) => void;
 
 function callbackify<
-        F extends (...args: any[]) => any,
-        P extends Parameters<F>,
-        R extends ReturnType<F>
-        >(original: F): (...args: [...P, AsyncCallback<R>]) => void {
+    F extends (...args: any[]) => any,
+    P extends Parameters<F>,
+    R extends ReturnType<F>
+>(original: F): (...args: [...P, AsyncCallback<R>]) => void {
     return function (...args: [...P, AsyncCallback<R>]): void {
         const numArgsMinusOne = args.length - 1;
 
