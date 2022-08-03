@@ -6,7 +6,8 @@ import stream from "stream";
 const getWindowsApi = memoize(_getWindowsApi);
 const getPosixApi = memoize(_getPosixApi);
 
-const { platform, pointerSize } = Process;
+const platform = Process.platform;
+const pointerSize = Process.pointerSize;
 const isWindows = platform === "windows";
 
 const S_IFMT = 0xf000;
@@ -93,7 +94,7 @@ const constants = {
     ...platformConstants[platform]
 };
 
-const INVALID_HANDLE_VALUE = ptr(-1);
+const INVALID_HANDLE_VALUE = -1;
 
 const GENERIC_READ = 0x80000000;
 const GENERIC_WRITE = 0x40000000;
@@ -1119,9 +1120,6 @@ function callbackify<
     };
 }
 
-const SF = SystemFunction;
-const NF = NativeFunction;
-
 const ssizeType = (pointerSize === 8) ? "int64" : "int32";
 const sizeType = "u" + ssizeType;
 const offsetType = (platform === "darwin" || pointerSize === 8) ? "int64" : "int32";
@@ -1148,6 +1146,9 @@ interface WindowsApi {
 }
 
 function _getWindowsApi(): WindowsApi {
+    const SF = SystemFunction;
+    const NF = NativeFunction;
+
     return makeApi<WindowsApi>([
         ["CreateFileW", SF, "pointer", ["pointer", "uint", "uint", "pointer", "uint", "uint", "pointer"]],
         ["DeleteFileW", SF, "uint", ["pointer"]],
@@ -1187,6 +1188,9 @@ interface PosixApi {
 }
 
 function _getPosixApi(): PosixApi {
+    const SF = SystemFunction;
+    const NF = NativeFunction;
+
     return makeApi<PosixApi>([
         ["open", SF, "int", ["pointer", "int", "...", "int"]],
         ["close", NF, "int", ["int"]],
