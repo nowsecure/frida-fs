@@ -1,6 +1,6 @@
 {
   "name": "frida-fs",
-  "version": "5.2.1",
+  "version": "5.2.2",
   "description": "Create a stream from a filesystem resource",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
