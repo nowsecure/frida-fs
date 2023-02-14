@@ -1,0 +1,159 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  MESON_VERSION: 1.0.0
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: [amd64_x86, amd64]
+      fail-fast: false
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v3
+      - name: Install dependencies
+        run: pip install meson==${{ env.MESON_VERSION }} ninja
+      - name: Environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+      - name: Build
+        run: |
+          npm install
+          cd test
+          npm install
+          meson setup `
+            --default-library static `
+            --force-fallback-for=zlib `
+            build
+          meson compile -C build
+      - name: Test
+        run: .\test\build\frida-fs-tests.exe
+
+  macos-x86_64:
+    runs-on: macos-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v3
+      - name: Install dependencies
+        run: pip3 install meson==${{ env.MESON_VERSION }} ninja
+      - name: Build
+        run: |
+          npm install
+          cd test
+          npm install
+          meson setup \
+            --default-library static \
+            --force-fallback-for=glib \
+            build
+          meson compile -C build
+      - name: Test
+        run: ./test/build/frida-fs-tests
+
+  linux-x86:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v3
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install gcc-multilib lib32stdc++-11-dev
+          pip install meson==${{ env.MESON_VERSION }}
+          .github/env/bootstrap.sh linux-x86_64 linux-x86
+      - name: Build
+        run: |
+          npm install
+          cd test
+          npm install
+          export PATH="/tmp/toolchain/bin:$PATH"
+          meson setup \
+            --native-file /tmp/native.txt \
+            --cross-file /tmp/cross.txt \
+            --default-library static \
+            build
+          meson compile -C build
+      - name: Test
+        run: ./test/build/frida-fs-tests
+
+  linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v3
+      - name: Install dependencies
+        run: pip install meson==${{ env.MESON_VERSION }} ninja
+      - name: Build
+        run: |
+          npm install
+          cd test
+          npm install
+          meson setup \
+            --default-library static \
+            --force-fallback-for=glib \
+            build
+          meson compile -C build
+      - name: Test
+        run: ./test/build/frida-fs-tests
+
+  linux-armhf:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v3
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install g++-arm-linux-gnueabihf qemu-user
+          pip install meson==${{ env.MESON_VERSION }}
+          .github/env/bootstrap.sh linux-x86_64 linux-armhf
+      - name: Build
+        run: |
+          npm install
+          cd test
+          npm install
+          export PATH="/tmp/toolchain/bin:$PATH"
+          meson setup \
+            --native-file /tmp/native.txt \
+            --cross-file /tmp/cross.txt \
+            --default-library static \
+            build
+          meson compile -C build
+      - name: Test
+        run: qemu-arm -L /usr/arm-linux-gnueabihf ./test/build/frida-fs-tests
+
+  linux-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v3
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install g++-aarch64-linux-gnu qemu-user
+          pip install meson==${{ env.MESON_VERSION }}
+          .github/env/bootstrap.sh linux-x86_64 linux-arm64
+      - name: Build
+        run: |
+          npm install
+          cd test
+          npm install
+          export PATH="/tmp/toolchain/bin:$PATH"
+          meson setup \
+            --native-file /tmp/native.txt \
+            --cross-file /tmp/cross.txt \
+            --default-library static \
+            build
+          meson compile -C build
+      - name: Test
+        run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./test/build/frida-fs-tests
