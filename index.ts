@@ -735,6 +735,24 @@ const statFields = new Set([
     "ctime",
     "birthtime",
 ]);
+const statSpecGenericLinux32: StatSpec = {
+    size: 88,
+    fields: {
+        "dev": [0, "U64"],
+        "mode": [16, "U32"],
+        "nlink": [20, "U32"],
+        "ino": [12, "U32"],
+        "uid": [24, "U32"],
+        "gid": [28, "U32"],
+        "rdev": [32, "U64"],
+        "atime": [56, readTimespec32],
+        "mtime": [64, readTimespec32],
+        "ctime": [72, readTimespec32],
+        "size": [44, "S32"],
+        "blocks": [52, "S32"],
+        "blksize": [48, "S32"],
+    }
+};
 const statSpecs: { [abi: string]: StatSpec; } = {
     "windows": {
         size: 36,
@@ -793,43 +811,26 @@ const statSpecs: { [abi: string]: StatSpec; } = {
             "blksize": [112, "S32"],
         }
     },
-    "linux-32": {
-        size: 88,
+    "linux-ia32": statSpecGenericLinux32,
+    "linux-ia32-stat64": {
+        size: 96,
         fields: {
             "dev": [0, "U64"],
             "mode": [16, "U32"],
             "nlink": [20, "U32"],
-            "ino": [12, "U32"],
+            "ino": [88, "U64"],
             "uid": [24, "U32"],
             "gid": [28, "U32"],
             "rdev": [32, "U64"],
-            "atime": [56, readTimespec32],
-            "mtime": [64, readTimespec32],
-            "ctime": [72, readTimespec32],
-            "size": [44, "S32"],
-            "blocks": [52, "S32"],
-            "blksize": [48, "S32"],
-        }
+            "atime": [64, readTimespec32],
+            "mtime": [72, readTimespec32],
+            "ctime": [80, readTimespec32],
+            "size": [44, "S64"],
+            "blocks": [56, "S64"],
+            "blksize": [52, "S32"],
+        },
     },
-    "linux-32-stat64": {
-        size: 104,
-        fields: {
-            "dev": [0, "U64"],
-            "mode": [16, "U32"],
-            "nlink": [20, "U32"],
-            "ino": [96, "U64"],
-            "uid": [24, "U32"],
-            "gid": [28, "U32"],
-            "rdev": [32, "U64"],
-            "atime": [72, readTimespec32],
-            "mtime": [80, readTimespec32],
-            "ctime": [88, readTimespec32],
-            "size": [48, "S64"],
-            "blocks": [64, "S64"],
-            "blksize": [56, "S32"],
-        }
-    },
-    "linux-64": {
+    "linux-x64": {
         size: 144,
         fields: {
             "dev": [0, "U64"],
@@ -847,6 +848,43 @@ const statSpecs: { [abi: string]: StatSpec; } = {
             "blksize": [56, "S64"],
         },
     },
+    "linux-arm": statSpecGenericLinux32,
+    "linux-arm-stat64": {
+        size: 104,
+        fields: {
+            "dev": [0, "U64"],
+            "mode": [16, "U32"],
+            "nlink": [20, "U32"],
+            "ino": [96, "U64"],
+            "uid": [24, "U32"],
+            "gid": [28, "U32"],
+            "rdev": [32, "U64"],
+            "atime": [72, readTimespec32],
+            "mtime": [80, readTimespec32],
+            "ctime": [88, readTimespec32],
+            "size": [48, "S64"],
+            "blocks": [64, "S64"],
+            "blksize": [56, "S32"],
+        }
+    },
+    "linux-arm64": {
+        size: 128,
+        fields: {
+            "dev": [0, "U64"],
+            "mode": [16, "U32"],
+            "nlink": [20, "U32"],
+            "ino": [8, "U64"],
+            "uid": [24, "U32"],
+            "gid": [28, "U32"],
+            "rdev": [32, "U64"],
+            "atime": [72, readTimespec64],
+            "mtime": [88, readTimespec64],
+            "ctime": [104, readTimespec64],
+            "size": [48, "S64"],
+            "blocks": [64, "S64"],
+            "blksize": [56, "S32"],
+        },
+    },
 };
 let cachedStatSpec: StatSpec | null = null;
 const statBufSize = 256;
@@ -862,15 +900,19 @@ function getStatSpec(): StatSpec {
         const api = getPosixApi();
         const stat64Impl = api.stat64 ?? api.__xstat64;
 
-        let platformId = `${platform}-${pointerSize * 8}`;
-        if (platformId === "linux-32") {
-            if (stat64Impl !== undefined)
+        let platformId: string;
+        if (platform === "darwin") {
+            platformId = `darwin-${pointerSize * 8}`;
+        } else {
+            platformId = `${platform}-${Process.arch}`;
+            if (pointerSize === 4 && stat64Impl !== undefined) {
                 platformId += "-stat64";
+            }
         }
 
         statSpec = statSpecs[platformId];
         if (statSpec === undefined)
-            throw new Error("Current OS is not yet supported; please open a PR");
+            throw new Error("Current OS/arch combo is not yet supported; please open a PR");
 
         statSpec._stat = stat64Impl ?? api.stat;
         statSpec._lstat = api.lstat64 ?? api.__lxstat64 ?? api.lstat;
