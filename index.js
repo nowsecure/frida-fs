@@ -115,7 +115,7 @@ class ReadStream extends stream.Readable {
     .then(buffer => {
       this._readRequest = null;
 
-      if (buffer.byteLength === 0) {
+      if (buffer.byteLength < size) {
         this._closeInput();
         this.push(null);
         return;
