@@ -886,6 +886,14 @@ const statSpecs: { [abi: string]: StatSpec; } = {
         },
     },
 };
+const linuxStatVersions: { [arch in Architecture]: number; } = {
+    ia32: 3,
+    x64: 1,
+    arm: 3,
+    arm64: 0,
+    mips: 3,
+};
+const STAT_VER_LINUX = linuxStatVersions[Process.arch];
 let cachedStatSpec: StatSpec | null = null;
 const statBufSize = 256;
 
@@ -1257,7 +1265,6 @@ function _getPosixApi(): PosixApi {
 }
 
 function invokeXstat(impl: any, path: string, buf: NativePointerValue): number {
-    const STAT_VER_LINUX = 3;
     return impl(STAT_VER_LINUX, path, buf);
 }
 
