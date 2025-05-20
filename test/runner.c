@@ -8,7 +8,7 @@
 static gchar * load_bundle (void);
 
 static gchar * detect_runner_location (void);
-static gboolean store_path_of_test_runner (const GumModuleDetails * details,
+static gboolean store_path_of_test_runner (GumModule * module,
     gpointer user_data);
 
 gchar * frida_fs_bundle = NULL;
@@ -96,12 +96,12 @@ detect_runner_location (void)
 }
 
 static gboolean
-store_path_of_test_runner (const GumModuleDetails * details,
+store_path_of_test_runner (GumModule * module,
                            gpointer user_data)
 {
   gchar ** path = user_data;
 
-  *path = g_strdup (details->path);
+  *path = g_strdup (gum_module_get_path (module));
 
   return FALSE;
 }
