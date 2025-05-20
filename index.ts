@@ -1291,6 +1291,7 @@ function makeApi<T>(spec: ApiSpec): T {
     }, {} as T);
 }
 
+const kernel32 = isWindows ? Process.getModuleByName("kernel32.dll") : null;
 const nativeOpts: NativeFunctionOptions = (isWindows && pointerSize === 4) ? { abi: "stdcall" } : {};
 
 function addApiPlaceholder<T>(api: T, entry: ApiSpecEntry): void {
@@ -1302,8 +1303,8 @@ function addApiPlaceholder<T>(api: T, entry: ApiSpecEntry): void {
 
             let impl = null;
             const address = isWindows
-                ? Module.findExportByName("kernel32.dll", name)
-                : Module.findExportByName(null, name);
+                ? kernel32!.findExportByName(name)
+                : Module.findGlobalExportByName(name);
             if (address !== null)
                 impl = new Ctor(address, retType, argTypes, nativeOpts);
 
