@@ -1002,10 +1002,13 @@ function makeStatsProxy(path: string, buf: NativePointer): Stats {
                     return receiver;
                 case "buffer":
                     return buf;
-                default:
-                    if (typeof property === "symbol" || property in target)
-                        return (target as any)[property];
+                default: {
+                    let val;
+                    if (typeof property === "symbol" || (val = (target as any)[property]) !== undefined) {
+                        return val;
+                    }
                     return statsReadField.call(receiver, property, path);
+                }
             }
         },
         set(target, property, value, receiver) {
