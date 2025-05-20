@@ -9,7 +9,7 @@ on:
       - main
 
 env:
-  MESON_VERSION: 1.0.0
+  GUM_OPTIONS: '-Dfrida-gum:gumjs=enabled'
 
 jobs:
   windows:
@@ -21,8 +21,6 @@ jobs:
     steps:
       - name: Check out repo
         uses: actions/checkout@v3
-      - name: Install dependencies
-        run: pip install meson==${{ env.MESON_VERSION }} ninja
       - name: Environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -32,11 +30,8 @@ jobs:
           npm install
           cd test
           npm install
-          meson setup `
-            --default-library static `
-            --force-fallback-for=zlib `
-            build
-          meson compile -C build
+          .\configure -- ${{ env.GUM_OPTIONS }}
+          .\make
       - name: Test
         run: .\test\build\frida-fs-tests.exe
 
@@ -45,18 +40,13 @@ jobs:
     steps:
       - name: Check out repo
         uses: actions/checkout@v3
-      - name: Install dependencies
-        run: pip3 install meson==${{ env.MESON_VERSION }} ninja
       - name: Build
         run: |
           npm install
           cd test
           npm install
-          meson setup \
-            --default-library static \
-            --force-fallback-for=glib \
-            build
-          meson compile -C build
+          ./configure -- ${{ env.GUM_OPTIONS }}
+          make
       - name: Test
         run: ./test/build/frida-fs-tests
 
@@ -68,21 +58,15 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install gcc-multilib lib32stdc++-11-dev
-          pip install meson==${{ env.MESON_VERSION }}
-          .github/env/bootstrap.sh linux-x86_64 linux-x86
+          sudo apt-get install gcc-multilib lib32stdc++-13-dev
       - name: Build
         run: |
           npm install
           cd test
           npm install
-          export PATH="/tmp/toolchain/bin:$PATH"
-          meson setup \
-            --native-file /tmp/native.txt \
-            --cross-file /tmp/cross.txt \
-            --default-library static \
-            build
-          meson compile -C build
+          CC="gcc -m32" CXX="g++ -m32" STRIP="strip" \
+              ./configure --build=linux-x86 --host=linux-x86 -- ${{ env.GUM_OPTIONS }}
+          make
       - name: Test
         run: ./test/build/frida-fs-tests
 
@@ -91,18 +75,13 @@ jobs:
     steps:
       - name: Check out repo
         uses: actions/checkout@v3
-      - name: Install dependencies
-        run: pip install meson==${{ env.MESON_VERSION }} ninja
       - name: Build
         run: |
           npm install
           cd test
           npm install
-          meson setup \
-            --default-library static \
-            --force-fallback-for=glib \
-            build
-          meson compile -C build
+          ./configure -- ${{ env.GUM_OPTIONS }}
+          make
       - name: Test
         run: ./test/build/frida-fs-tests
 
@@ -115,20 +94,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install g++-arm-linux-gnueabihf qemu-user
-          pip install meson==${{ env.MESON_VERSION }}
-          .github/env/bootstrap.sh linux-x86_64 linux-armhf
       - name: Build
         run: |
           npm install
           cd test
           npm install
-          export PATH="/tmp/toolchain/bin:$PATH"
-          meson setup \
-            --native-file /tmp/native.txt \
-            --cross-file /tmp/cross.txt \
-            --default-library static \
-            build
-          meson compile -C build
+          ./configure --host=arm-linux-gnueabihf -- ${{ env.GUM_OPTIONS }}
+          make
       - name: Test
         run: qemu-arm -L /usr/arm-linux-gnueabihf ./test/build/frida-fs-tests
 
@@ -141,19 +113,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install g++-aarch64-linux-gnu qemu-user
-          pip install meson==${{ env.MESON_VERSION }}
-          .github/env/bootstrap.sh linux-x86_64 linux-arm64
       - name: Build
         run: |
           npm install
           cd test
           npm install
-          export PATH="/tmp/toolchain/bin:$PATH"
-          meson setup \
-            --native-file /tmp/native.txt \
-            --cross-file /tmp/cross.txt \
-            --default-library static \
-            build
-          meson compile -C build
+          ./configure --host=aarch64-linux-gnu -- ${{ env.GUM_OPTIONS }}
+          make
       - name: Test
         run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./test/build/frida-fs-tests
