@@ -123,16 +123,33 @@ const SEEK_SET = 0;
 const SEEK_CUR = 1;
 const SEEK_END = 2;
 
+const FILE_BEGIN = 0;
+const FILE_CURRENT = 1;
+const FILE_END = 2;
+
 const EINTR = 4;
+
+type ReadStreamOptions = {
+    highWaterMark?: number;
+    start?: number;
+    end?: number;
+};
 
 class ReadStream extends stream.Readable {
     #input: InputStream | null = null;
     #readRequest: Promise<void> | null = null;
+    #start: number;
+    #end: number | null = null;
+    #position: number;
 
-    constructor(path: string) {
+    constructor(path: string, options: ReadStreamOptions = {}) {
         super({
-            highWaterMark: 4 * 1024 * 1024
+            highWaterMark: options.highWaterMark ?? (4 * 1024 * 1024)
         });
+
+        this.#start = options.start ?? 0;
+        this.#end = options.end ?? null;
+        this.#position = this.#start;
 
         if (isWindows) {
             const api = getWindowsApi();
@@ -155,6 +172,16 @@ class ReadStream extends stream.Readable {
             }
 
             this.#input = new Win32InputStream(handle, { autoClose: true });
+
+            if (this.#start > 0) {
+                const seekResult = api.SetFilePointer(handle, this.#start, NULL, FILE_BEGIN);
+                if (seekResult.value === -1) {
+                    process.nextTick(() => {
+                        this.destroy(makeWindowsError(seekResult.lastError));
+                    });
+                    return;
+                }
+            }
         } else {
             const api = getPosixApi();
 
@@ -169,6 +196,16 @@ class ReadStream extends stream.Readable {
             }
 
             this.#input = new UnixInputStream(fd, { autoClose: true });
+
+            if (this.#start > 0) {
+                const seekResult = api.lseek(fd, this.#start, SEEK_SET);
+                if (seekResult.valueOf() === -1) {
+                    process.nextTick(() => {
+                        this.destroy(makePosixError(0));
+                    });
+                    return;
+                }
+            }
         }
     }
 
@@ -183,9 +220,20 @@ class ReadStream extends stream.Readable {
         if (this.#readRequest !== null)
             return;
 
-        this.#readRequest = this.#input!.read(size)
+        let bytesToRead = size;
+        if (this.#end !== null) {
+            const remainingBytes = this.#end - this.#position + 1;
+            if (remainingBytes <= 0) {
+                this.push(null);
+                return;
+            }
+            bytesToRead = Math.min(bytesToRead, remainingBytes);
+        }
+
+        this.#readRequest = this.#input!.read(bytesToRead)
             .then(buffer => {
                 this.#readRequest = null;
+                this.#position += buffer.byteLength;
 
                 if (buffer.byteLength === 0) {
                     this.push(null);
@@ -1196,6 +1244,7 @@ interface WindowsApi {
         : WindowsSystemFunctionResult<number>;
     FormatMessageW(flags: number, source: NativePointerValue, messageId: number, languageId: number, buffer: NativePointerValue,
         size: number, args: NativePointerValue): number;
+    SetFilePointer(file: NativePointerValue, distanceToMove: number, newFilePointer: NativePointerValue, moveMethod: number): WindowsSystemFunctionResult<number>;
 }
 
 function _getWindowsApi(): WindowsApi {
@@ -1215,6 +1264,7 @@ function _getWindowsApi(): WindowsApi {
         ["GetFileAttributesExW", SF, "uint", ["pointer", "uint", "pointer"]],
         ["GetFinalPathNameByHandleW", SF, "uint", ["pointer", "pointer", "uint", "uint"]],
         ["FormatMessageW", NF, "uint", ["uint", "pointer", "uint", "uint", "pointer", "uint", "pointer"]],
+        ["SetFilePointer", SF, "int", ["pointer", "int", "pointer", "int"]],
     ]);
 }
 
@@ -1324,8 +1374,8 @@ function addApiPlaceholder<T>(api: T, entry: ApiSpecEntry): void {
     });
 }
 
-export function createReadStream(path: string): ReadStream {
-    return new ReadStream(path);
+export function createReadStream(path: string, options?: ReadStreamOptions): ReadStream {
+    return new ReadStream(path, options);
 }
 
 export function createWriteStream(path: string): WriteStream {
