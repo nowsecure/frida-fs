@@ -53,6 +53,15 @@ const universalConstants: ApiConstants = {
     DT_LNK: 10,
     DT_SOCK: 12,
     DT_WHT: 14,
+
+    F_OK: 0,
+    R_OK: 4,
+    W_OK: 2,
+    X_OK: 1,
+
+    COPYFILE_EXCL: 0x1,
+    COPYFILE_FICLONE: 0x2,
+    COPYFILE_FICLONE_FORCE: 0x4,
 };
 const platformConstants: Partial<Record<Platform, ApiConstants>> = {
     darwin: {
@@ -285,7 +294,25 @@ interface PlatformBackend {
     unlinkSync(path: string): void;
     statSync(path: string): Stats;
     lstatSync(path: string): Stats;
+    mkdirSync(path: string, mode?: number): void;
+    existsSync(path: string): boolean;
+    renameSync(oldPath: string, newPath: string): void;
+    chmodSync(path: string, mode: number): void;
+    chownSync(path: string, uid: number, gid: number): void;
+    utimesSync(path: string, atime: Date, mtime: Date): void;
+    realpathSync(path: string): string;
+    symlinkSync(target: string, path: string, type?: string): void;
+    truncateSync(path: string, len?: number): void;
+    copyFileSync(src: string, dest: string, flags?: number): void;
+    accessSync(path: string, mode?: number): void;
 }
+
+const MOVEFILE_REPLACE_EXISTING = 0x1;
+const MOVEFILE_COPY_ALLOWED = 0x2;
+const MOVEFILE_WRITE_THROUGH = 0x8;
+const SYMBOLIC_LINK_FLAG_DIRECTORY = 0x1;
+const SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE = 0x2;
+const FILE_WRITE_ATTRIBUTES = 0x100;
 
 const windowsBackend: PlatformBackend = {
     enumerateDirectoryEntries(path: string, callback: (entry: NativePointer) => void): void {
@@ -401,7 +428,6 @@ const windowsBackend: PlatformBackend = {
             if (result.lastError === ERROR_SHARING_VIOLATION) {
                 let fileAttrData: NativePointer;
                 enumerateWindowsDirectoryEntriesMatching(path, data => {
-                    // WIN32_FIND_DATAW starts with the exact same fields as WIN32_FILE_ATTRIBUTE_DATA
                     fileAttrData = Memory.dup(data, 36);
                 });
                 return makeStatsProxy(path, fileAttrData!);
@@ -409,6 +435,170 @@ const windowsBackend: PlatformBackend = {
             throwWindowsError(result.lastError);
         }
         return makeStatsProxy(path, buf);
+    },
+
+    mkdirSync(path: string, _mode?: number): void {
+        const result = getWindowsApi().CreateDirectoryW(Memory.allocUtf16String(path), NULL);
+        if (result.value === 0)
+            throwWindowsError(result.lastError);
+    },
+
+    existsSync(path: string): boolean {
+        const { GetFileAttributesExW } = getWindowsApi();
+        const getFileExInfoStandard = 0;
+        const buf = Memory.alloc(36);
+        const result = GetFileAttributesExW(Memory.allocUtf16String(path), getFileExInfoStandard, buf);
+        return result.value !== 0;
+    },
+
+    renameSync(oldPath: string, newPath: string): void {
+        const flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH;
+        const result = getWindowsApi().MoveFileExW(
+            Memory.allocUtf16String(oldPath),
+            Memory.allocUtf16String(newPath),
+            flags);
+        if (result.value === 0)
+            throwWindowsError(result.lastError);
+    },
+
+    chmodSync(path: string, mode: number): void {
+        const { GetFileAttributesExW, SetFileAttributesW } = getWindowsApi();
+        const getFileExInfoStandard = 0;
+        const buf = Memory.alloc(36);
+        const getRes = GetFileAttributesExW(Memory.allocUtf16String(path), getFileExInfoStandard, buf);
+        if (getRes.value === 0)
+            throwWindowsError(getRes.lastError);
+
+        const attrs = buf.readU32();
+        const newAttrs = (mode & constants.S_IWUSR) ? (attrs & ~0x1) : (attrs | 0x1);
+        if (newAttrs !== attrs) {
+            const setRes = SetFileAttributesW(Memory.allocUtf16String(path), newAttrs);
+            if (setRes.value === 0)
+                throwWindowsError(setRes.lastError);
+        }
+    },
+
+    chownSync(_path: string, _uid: number, _gid: number): void {
+    },
+
+    utimesSync(path: string, atime: Date, mtime: Date): void {
+        const { CreateFileW, SetFileTime, CloseHandle } = getWindowsApi();
+
+        const createRes = CreateFileW(
+            Memory.allocUtf16String(path),
+            FILE_WRITE_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            NULL,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            NULL);
+        const handle = createRes.value;
+        if (handle.equals(INVALID_HANDLE_VALUE))
+            throwWindowsError(createRes.lastError);
+
+        try {
+            const a = dateToWindowsFileTime(atime);
+            const m = dateToWindowsFileTime(mtime);
+            const setRes = SetFileTime(handle, NULL, a, m);
+            if (setRes.value === 0)
+                throwWindowsError(setRes.lastError);
+        } finally {
+            CloseHandle(handle);
+        }
+    },
+
+    realpathSync(path: string): string {
+        const { GetFullPathNameW } = getWindowsApi();
+        const buf = Memory.alloc(512);
+        const len = GetFullPathNameW(Memory.allocUtf16String(path), 256, buf, NULL);
+        if (len === 0)
+            throw new Error("GetFullPathNameW failed");
+        return buf.readUtf16String(len)!;
+    },
+
+    symlinkSync(target: string, path: string, type?: string): void {
+        const { CreateSymbolicLinkW } = getWindowsApi();
+        let flags = 0;
+        if (type === "dir" || type === "junction") {
+            flags = SYMBOLIC_LINK_FLAG_DIRECTORY;
+        }
+        const result = CreateSymbolicLinkW(
+            Memory.allocUtf16String(path),
+            Memory.allocUtf16String(target),
+            flags);
+        if (result.value === 0)
+            throwWindowsError(result.lastError);
+    },
+
+    truncateSync(path: string, len?: number): void {
+        const { CreateFileW, SetFilePointerEx, SetEndOfFile, CloseHandle } = getWindowsApi();
+        const actualLen = len ?? 0;
+
+        const createRes = CreateFileW(
+            Memory.allocUtf16String(path),
+            GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            NULL,
+            OPEN_EXISTING,
+            0,
+            NULL);
+        const handle = createRes.value;
+        if (handle.equals(INVALID_HANDLE_VALUE))
+            throwWindowsError(createRes.lastError);
+
+        try {
+            const newPos = Memory.alloc(8);
+            newPos.writeS64(actualLen);
+            const seekRes = SetFilePointerEx(handle, newPos, NULL, SEEK_SET);
+            if (seekRes.value === 0)
+                throwWindowsError(seekRes.lastError);
+
+            const endRes = SetEndOfFile(handle);
+            if (endRes.value === 0)
+                throwWindowsError(endRes.lastError);
+        } finally {
+            CloseHandle(handle);
+        }
+    },
+
+    copyFileSync(src: string, dest: string, flags?: number): void {
+        const { CopyFileW } = getWindowsApi();
+        const failIfExists = (flags !== undefined && (flags & constants.COPYFILE_EXCL) !== 0) ? 1 : 0;
+        const result = CopyFileW(
+            Memory.allocUtf16String(src),
+            Memory.allocUtf16String(dest),
+            failIfExists);
+        if (result.value === 0)
+            throwWindowsError(result.lastError);
+    },
+
+    accessSync(path: string, mode?: number): void {
+        const actualMode = mode ?? constants.F_OK;
+        if (actualMode === constants.F_OK) {
+            if (!windowsBackend.existsSync(path))
+                throw new Error("ENOENT: no such file or directory, access");
+            return;
+        }
+
+        const { GetFileAttributesExW } = getWindowsApi();
+        const getFileExInfoStandard = 0;
+        const buf = Memory.alloc(36);
+        const result = GetFileAttributesExW(Memory.allocUtf16String(path), getFileExInfoStandard, buf);
+        if (result.value === 0)
+            throwWindowsError(result.lastError);
+
+        const attrs = buf.readU32();
+
+        if (actualMode & constants.W_OK) {
+            if ((attrs & 0x1) !== 0)
+                throw new Error("EACCES: permission denied, access");
+        }
+
+        if (actualMode & constants.X_OK) {
+            const lower = path.toLowerCase();
+            if (!lower.endsWith(".exe") && !lower.endsWith(".bat") && !lower.endsWith(".cmd") && !lower.endsWith(".com"))
+                throw new Error("EACCES: permission denied, access");
+        }
     },
 };
 
@@ -428,6 +618,27 @@ function enumerateWindowsDirectoryEntriesMatching(filename: string, callback: (e
         } while (FindNextFileW(handle, data) !== 0);
     } finally {
         FindClose(handle);
+    }
+}
+
+function dateToWindowsFileTime(date: Date): NativePointer {
+    const ticksPerMsec = 10000n;
+    const msecToUnixEpoch = 11644473600000n;
+    const fileTime = (BigInt(date.getTime()) + msecToUnixEpoch) * ticksPerMsec;
+    const buf = Memory.alloc(8);
+    buf.writeU64(uint64(fileTime.toString()));
+    return buf;
+}
+
+function writeTimevalToBuffer(buf: NativePointer, date: Date): void {
+    const sec = Math.floor(date.getTime() / 1000);
+    const usec = (date.getTime() % 1000) * 1000;
+    if (pointerSize === 8) {
+        buf.writeS64(sec);
+        buf.add(8).writeS64(usec);
+    } else {
+        buf.writeS32(sec);
+        buf.add(4).writeS32(usec);
     }
 }
 
@@ -523,6 +734,100 @@ const posixBackend: PlatformBackend = {
     lstatSync(path: string): Stats {
         return performStatPosix(getStatSpec()._lstat!, path);
     },
+
+    mkdirSync(path: string, mode?: number): void {
+        const actualMode = mode ?? (constants.S_IRWXU | constants.S_IRWXG | constants.S_IRWXO);
+        const result = getPosixApi().mkdir(Memory.allocUtf8String(path), actualMode);
+        if (result.value === -1)
+            throwPosixError(result.errno);
+    },
+
+    existsSync(path: string): boolean {
+        const result = getPosixApi().access(Memory.allocUtf8String(path), constants.F_OK);
+        return result.value === 0;
+    },
+
+    renameSync(oldPath: string, newPath: string): void {
+        const result = getPosixApi().rename(
+            Memory.allocUtf8String(oldPath),
+            Memory.allocUtf8String(newPath));
+        if (result.value === -1)
+            throwPosixError(result.errno);
+    },
+
+    chmodSync(path: string, mode: number): void {
+        const result = getPosixApi().chmod(Memory.allocUtf8String(path), mode);
+        if (result.value === -1)
+            throwPosixError(result.errno);
+    },
+
+    chownSync(path: string, uid: number, gid: number): void {
+        const result = getPosixApi().chown(Memory.allocUtf8String(path), uid, gid);
+        if (result.value === -1)
+            throwPosixError(result.errno);
+    },
+
+    utimesSync(path: string, atime: Date, mtime: Date): void {
+        const timesBuf = Memory.alloc(32);
+        writeTimevalToBuffer(timesBuf, atime);
+        writeTimevalToBuffer(timesBuf.add(16), mtime);
+
+        const result = getPosixApi().utimes(Memory.allocUtf8String(path), timesBuf);
+        if (result.value === -1)
+            throwPosixError(result.errno);
+    },
+
+    realpathSync(path: string): string {
+        const { realpath } = getPosixApi();
+        const resolved = realpath(Memory.allocUtf8String(path), NULL);
+        if (resolved.isNull())
+            throwPosixError(-1);
+        const result = resolved.readUtf8String()!;
+        return result;
+    },
+
+    symlinkSync(target: string, path: string, _type?: string): void {
+        const result = getPosixApi().symlink(
+            Memory.allocUtf8String(target),
+            Memory.allocUtf8String(path));
+        if (result.value === -1)
+            throwPosixError(result.errno);
+    },
+
+    truncateSync(path: string, len?: number): void {
+        const { truncate } = getPosixApi();
+        const actualLen = len ?? 0;
+        const result = truncate(Memory.allocUtf8String(path), actualLen);
+        if (result.value === -1)
+            throwPosixError(result.errno);
+    },
+
+    copyFileSync(src: string, dest: string, flags?: number): void {
+        const statSrc = posixBackend.statSync(src);
+        const buf = posixBackend.readFileSync(src) as Buffer;
+
+        const failIfExists = (flags !== undefined && (flags & constants.COPYFILE_EXCL) !== 0);
+        if (failIfExists && posixBackend.existsSync(dest))
+            throw new Error("EEXIST: file already exists, copyFile");
+
+        const file = new File(dest, "wb");
+        try {
+            file.write(buf.buffer as ArrayBuffer);
+        } finally {
+            file.close();
+        }
+
+        if ((flags !== undefined && (flags & constants.COPYFILE_FICLONE) !== 0))
+            return;
+        posixBackend.chmodSync(dest, statSrc.mode);
+    },
+
+    accessSync(path: string, mode?: number): void {
+        const actualMode = mode ?? constants.F_OK;
+        const result = getPosixApi().access(Memory.allocUtf8String(path), actualMode);
+        if (result.value === -1)
+            throwPosixError(result.errno);
+    },
 };
 
 function writeFileSync(path: string, data: string | NodeJS.ArrayBufferView, options: WriteFileOptions = {}): void {
@@ -541,6 +846,29 @@ function writeFileSync(path: string, data: string | NodeJS.ArrayBufferView, opti
     }
 
     const file = new File(path, "wb");
+    try {
+        file.write(rawData);
+    } finally {
+        file.close();
+    }
+}
+
+function appendFileSync(path: string, data: string | NodeJS.ArrayBufferView, options: WriteFileOptions = {}): void {
+    if (typeof options === "string")
+        options = { encoding: options };
+    const { encoding = null } = options;
+
+    let rawData: string | ArrayBuffer;
+    if (typeof data === "string") {
+        if (encoding !== null && !encodingIsUtf8(encoding))
+            rawData = Buffer.from(data, encoding).buffer as ArrayBuffer;
+        else
+            rawData = data;
+    } else {
+        rawData = data.buffer as ArrayBuffer;
+    }
+
+    const file = new File(path, "ab");
     try {
         file.write(rawData);
     } finally {
@@ -586,6 +914,17 @@ const {
     unlinkSync,
     statSync,
     lstatSync,
+    mkdirSync,
+    existsSync,
+    renameSync,
+    chmodSync,
+    chownSync,
+    utimesSync,
+    realpathSync,
+    symlinkSync,
+    truncateSync,
+    copyFileSync,
+    accessSync,
 } = backend;
 
 interface DirentSpec {
@@ -1196,6 +1535,20 @@ interface WindowsApi {
         : WindowsSystemFunctionResult<number>;
     FormatMessageW(flags: number, source: NativePointerValue, messageId: number, languageId: number, buffer: NativePointerValue,
         size: number, args: NativePointerValue): number;
+    CreateDirectoryW(pathName: NativePointerValue, securityAttributes: NativePointerValue): WindowsSystemFunctionResult<number>;
+    MoveFileExW(existingFileName: NativePointerValue, newFileName: NativePointerValue, flags: number): WindowsSystemFunctionResult<number>;
+    SetFileAttributesW(fileName: NativePointerValue, fileAttributes: number): WindowsSystemFunctionResult<number>;
+    SetFileTime(file: NativePointerValue, creationTime: NativePointerValue, lastAccessTime: NativePointerValue,
+        lastWriteTime: NativePointerValue): WindowsSystemFunctionResult<number>;
+    GetFullPathNameW(fileName: NativePointerValue, bufferLength: number, buffer: NativePointerValue,
+        filePart: NativePointerValue): number;
+    CreateSymbolicLinkW(symlinkFileName: NativePointerValue, targetFileName: NativePointerValue,
+        flags: number): WindowsSystemFunctionResult<number>;
+    SetFilePointerEx(file: NativePointerValue, distanceToMove: NativePointerValue, newFilePointer: NativePointerValue,
+        moveMethod: number): WindowsSystemFunctionResult<number>;
+    SetEndOfFile(file: NativePointerValue): WindowsSystemFunctionResult<number>;
+    CopyFileW(existingFileName: NativePointerValue, newFileName: NativePointerValue,
+        failIfExists: number): WindowsSystemFunctionResult<number>;
 }
 
 function _getWindowsApi(): WindowsApi {
@@ -1215,6 +1568,15 @@ function _getWindowsApi(): WindowsApi {
         ["GetFileAttributesExW", SF, "uint", ["pointer", "uint", "pointer"]],
         ["GetFinalPathNameByHandleW", SF, "uint", ["pointer", "pointer", "uint", "uint"]],
         ["FormatMessageW", NF, "uint", ["uint", "pointer", "uint", "uint", "pointer", "uint", "pointer"]],
+        ["CreateDirectoryW", SF, "uint", ["pointer", "pointer"]],
+        ["MoveFileExW", SF, "uint", ["pointer", "pointer", "uint"]],
+        ["SetFileAttributesW", SF, "uint", ["pointer", "uint"]],
+        ["SetFileTime", SF, "uint", ["pointer", "pointer", "pointer", "pointer"]],
+        ["GetFullPathNameW", NF, "uint", ["pointer", "uint", "pointer", "pointer"]],
+        ["CreateSymbolicLinkW", SF, "uint", ["pointer", "pointer", "uint"]],
+        ["SetFilePointerEx", SF, "uint", ["pointer", "pointer", "pointer", "uint"]],
+        ["SetEndOfFile", SF, "uint", ["pointer"]],
+        ["CopyFileW", SF, "uint", ["pointer", "pointer", "uint"]],
     ]);
 }
 
@@ -1238,6 +1600,15 @@ interface PosixApi {
     lstat64(path: NativePointerValue, buf: NativePointerValue): UnixSystemFunctionResult<number>;
     __lxstat64(version: number, path: NativePointerValue, buf: NativePointerValue): UnixSystemFunctionResult<number>;
     strerror(errnum: number): NativePointer;
+    mkdir(path: NativePointerValue, mode: number): UnixSystemFunctionResult<number>;
+    rename(oldpath: NativePointerValue, newpath: NativePointerValue): UnixSystemFunctionResult<number>;
+    chmod(path: NativePointerValue, mode: number): UnixSystemFunctionResult<number>;
+    chown(path: NativePointerValue, owner: number, group: number): UnixSystemFunctionResult<number>;
+    utimes(path: NativePointerValue, times: NativePointerValue): UnixSystemFunctionResult<number>;
+    realpath(path: NativePointerValue, resolvedPath: NativePointerValue): NativePointer;
+    symlink(target: NativePointerValue, linkpath: NativePointerValue): UnixSystemFunctionResult<number>;
+    truncate(path: NativePointerValue, length: number | Int64): UnixSystemFunctionResult<number>;
+    access(path: NativePointerValue, mode: number): UnixSystemFunctionResult<number>;
 }
 
 function _getPosixApi(): PosixApi {
@@ -1264,6 +1635,15 @@ function _getPosixApi(): PosixApi {
         ["lstat64", SF, "int", ["pointer", "pointer"]],
         ["__lxstat64", SF, "int", ["int", "pointer", "pointer"], invokeXstat],
         ["strerror", NF, "pointer", ["int"]],
+        ["mkdir", SF, "int", ["pointer", "int"]],
+        ["rename", SF, "int", ["pointer", "pointer"]],
+        ["chmod", SF, "int", ["pointer", "int"]],
+        ["chown", SF, "int", ["pointer", "uint", "uint"]],
+        ["utimes", SF, "int", ["pointer", "pointer"]],
+        ["realpath", NF, "pointer", ["pointer", "pointer"]],
+        ["symlink", SF, "int", ["pointer", "pointer"]],
+        ["truncate", SF, "int", ["pointer", offsetType]],
+        ["access", SF, "int", ["pointer", "int"]],
     ]);
 }
 
@@ -1335,11 +1715,23 @@ export function createWriteStream(path: string): WriteStream {
 export const readdir = callbackify(readdirSync);
 export const readFile = callbackify(readFileSync);
 export const writeFile = callbackify(writeFileSync);
+export const appendFile = callbackify(appendFileSync);
 export const readlink = callbackify(readlinkSync);
 export const rmdir = callbackify(rmdirSync);
 export const unlink = callbackify(unlinkSync);
 export const stat = callbackify(statSync);
 export const lstat = callbackify(lstatSync);
+export const mkdir = callbackify(mkdirSync);
+export const exists = callbackify(existsSync);
+export const rename = callbackify(renameSync);
+export const chmod = callbackify(chmodSync);
+export const chown = callbackify(chownSync);
+export const utimes = callbackify(utimesSync);
+export const realpath = callbackify(realpathSync);
+export const symlink = callbackify(symlinkSync);
+export const truncate = callbackify(truncateSync);
+export const copyFile = callbackify(copyFileSync);
+export const access = callbackify(accessSync);
 
 function memoize<T>(compute: Compute<T>): Compute<T> {
     let value: T;
@@ -1363,11 +1755,23 @@ export {
     list,
     readFileSync,
     writeFileSync,
+    appendFileSync,
     readlinkSync,
     rmdirSync,
     unlinkSync,
     statSync,
     lstatSync,
+    mkdirSync,
+    existsSync,
+    renameSync,
+    chmodSync,
+    chownSync,
+    utimesSync,
+    realpathSync,
+    symlinkSync,
+    truncateSync,
+    copyFileSync,
+    accessSync,
     Stats,
 };
 
@@ -1382,6 +1786,8 @@ export default {
     readFileSync,
     writeFile,
     writeFileSync,
+    appendFile,
+    appendFileSync,
     readlink,
     readlinkSync,
     rmdir,
@@ -1392,5 +1798,27 @@ export default {
     statSync,
     lstat,
     lstatSync,
+    mkdir,
+    mkdirSync,
+    exists,
+    existsSync,
+    rename,
+    renameSync,
+    chmod,
+    chmodSync,
+    chown,
+    chownSync,
+    utimes,
+    utimesSync,
+    realpath,
+    realpathSync,
+    symlink,
+    symlinkSync,
+    truncate,
+    truncateSync,
+    copyFile,
+    copyFileSync,
+    access,
+    accessSync,
     Stats,
 };
