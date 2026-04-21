@@ -294,7 +294,7 @@ interface PlatformBackend {
     unlinkSync(path: string): void;
     statSync(path: string): Stats;
     lstatSync(path: string): Stats;
-    mkdirSync(path: string, mode?: number): void;
+    mkdirRaw(path: string, mode: number): void;
     existsSync(path: string): boolean;
     renameSync(oldPath: string, newPath: string): void;
     chmodSync(path: string, mode: number): void;
@@ -437,7 +437,7 @@ const windowsBackend: PlatformBackend = {
         return makeStatsProxy(path, buf);
     },
 
-    mkdirSync(path: string, _mode?: number): void {
+    mkdirRaw(path: string, _mode: number): void {
         const result = getWindowsApi().CreateDirectoryW(Memory.allocUtf16String(path), NULL);
         if (result.value === 0)
             throwWindowsError(result.lastError);
@@ -735,9 +735,8 @@ const posixBackend: PlatformBackend = {
         return performStatPosix(getStatSpec()._lstat!, path);
     },
 
-    mkdirSync(path: string, mode?: number): void {
-        const actualMode = mode ?? (constants.S_IRWXU | constants.S_IRWXG | constants.S_IRWXO);
-        const result = getPosixApi().mkdir(Memory.allocUtf8String(path), actualMode);
+    mkdirRaw(path: string, mode: number): void {
+        const result = getPosixApi().mkdir(Memory.allocUtf8String(path), mode);
         if (result.value === -1)
             throwPosixError(result.errno);
     },
@@ -914,7 +913,7 @@ const {
     unlinkSync,
     statSync,
     lstatSync,
-    mkdirSync,
+    mkdirRaw,
     existsSync,
     renameSync,
     chmodSync,
@@ -926,6 +925,42 @@ const {
     copyFileSync,
     accessSync,
 } = backend;
+
+type MkdirOptions = number | { recursive?: boolean; mode?: number; };
+
+function mkdirSync(path: string, options?: MkdirOptions): void {
+    let mode: number;
+    let recursive = false;
+
+    if (typeof options === "number") {
+        mode = options;
+    } else if (options !== undefined) {
+        mode = options.mode ?? (constants.S_IRWXU | constants.S_IRWXG | constants.S_IRWXO);
+        recursive = options.recursive ?? false;
+    } else {
+        mode = constants.S_IRWXU | constants.S_IRWXG | constants.S_IRWXO;
+    }
+
+    if (recursive) {
+        const sep = isWindows ? "\\" : "/";
+        const parts = fsPath.normalize(path).split(sep).filter(p => p.length > 0);
+        if (isWindows && path.startsWith("\\\\")) {
+            parts[0] = "\\\\" + parts[0];
+        } else if (path.startsWith("/")) {
+            parts[0] = "/" + parts[0];
+        }
+
+        let current = "";
+        for (const part of parts) {
+            current = current.length === 0 ? part : current + sep + part;
+            if (existsSync(current))
+                continue;
+            mkdirRaw(current, mode);
+        }
+    } else {
+        mkdirRaw(path, mode);
+    }
+}
 
 interface DirentSpec {
     d_name: DirentFieldSpec<string>;
