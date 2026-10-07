@@ -9,6 +9,7 @@ const getPosixApi = memoize(_getPosixApi);
 const platform = Process.platform;
 const pointerSize = Process.pointerSize;
 const isWindows = platform === "windows";
+const usesAnsiWindowsApi = memoize(_usesAnsiWindowsApi);
 
 const S_IFMT = 0xf000;
 const S_IFREG = 0x8000;
@@ -118,6 +119,9 @@ const FILE_FLAG_BACKUP_SEMANTICS = 0x2000000;
 
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_SHARING_VIOLATION = 32;
+const ERROR_NOT_SUPPORTED = 50;
+
+const WIN32_FILE_ATTRIBUTE_DATA_SIZE = 36;
 
 const SEEK_SET = 0;
 const SEEK_CUR = 1;
@@ -137,13 +141,13 @@ class ReadStream extends stream.Readable {
         if (isWindows) {
             const api = getWindowsApi();
 
-            const result = api.CreateFileW(
-                Memory.allocUtf16String(path),
+            const result = api.CreateFile(
+                allocWindowsString(path),
                 GENERIC_READ,
                 FILE_SHARE_READ,
                 NULL,
                 OPEN_EXISTING,
-                FILE_FLAG_OVERLAPPED,
+                windowsStreamFlags(),
                 NULL);
 
             const handle = result.value;
@@ -200,6 +204,7 @@ class ReadStream extends stream.Readable {
                 this.destroy(error);
             });
     }
+
 }
 
 class WriteStream extends stream.Writable {
@@ -214,13 +219,13 @@ class WriteStream extends stream.Writable {
         if (isWindows) {
             const api = getWindowsApi();
 
-            const result = api.CreateFileW(
-                Memory.allocUtf16String(path),
+            const result = api.CreateFile(
+                allocWindowsString(path),
                 GENERIC_WRITE,
                 0,
                 NULL,
                 CREATE_ALWAYS,
-                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+                FILE_ATTRIBUTE_NORMAL | windowsStreamFlags(),
                 NULL);
 
             const handle = result.value;
@@ -289,7 +294,8 @@ interface PlatformBackend {
 
 const windowsBackend: PlatformBackend = {
     enumerateDirectoryEntries(path: string, callback: (entry: NativePointer) => void): void {
-        enumerateWindowsDirectoryEntriesMatching(path + "\\*", callback);
+        const separator = path.endsWith("\\") ? "" : "\\";
+        enumerateWindowsDirectoryEntriesMatching(path + separator + "*", callback);
     },
 
     readFileSync(path: string, options: ReadFileOptions = {}): string | Buffer {
@@ -297,10 +303,10 @@ const windowsBackend: PlatformBackend = {
             options = { encoding: options };
         const { encoding = null } = options;
 
-        const { CreateFileW, GetFileSizeEx, ReadFile, CloseHandle } = getWindowsApi();
+        const { CreateFile, GetFileSizeEx, ReadFile, CloseHandle } = getWindowsApi();
 
-        const createRes = CreateFileW(
-            Memory.allocUtf16String(path),
+        const createRes = CreateFile(
+            allocWindowsString(path),
             GENERIC_READ,
             FILE_SHARE_READ,
             NULL,
@@ -338,10 +344,13 @@ const windowsBackend: PlatformBackend = {
     },
 
     readlinkSync(path: string): string {
-        const { CreateFileW, GetFinalPathNameByHandleW, CloseHandle } = getWindowsApi();
+        if (usesAnsiWindowsApi())
+            throwWindowsError(ERROR_NOT_SUPPORTED);
 
-        const createRes = CreateFileW(
-            Memory.allocUtf16String(path),
+        const { CreateFile, GetFinalPathNameByHandle, CloseHandle } = getWindowsApi();
+
+        const createRes = CreateFile(
+            allocWindowsString(path),
             0,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             NULL,
@@ -357,7 +366,7 @@ const windowsBackend: PlatformBackend = {
             while (true) {
                 const buf = Memory.alloc(maxLength * 2);
 
-                const { value, lastError } = GetFinalPathNameByHandleW(handle, buf, maxLength, 0);
+                const { value, lastError } = GetFinalPathNameByHandle(handle, buf, maxLength, 0);
                 if (value === 0)
                     throwWindowsError(lastError);
                 if (lastError === ERROR_NOT_ENOUGH_MEMORY) {
@@ -365,7 +374,7 @@ const windowsBackend: PlatformBackend = {
                     continue;
                 }
 
-                return buf.readUtf16String()!.substring(4);
+                return readWindowsString(buf).substring(4);
             }
         } finally {
             CloseHandle(handle);
@@ -373,13 +382,13 @@ const windowsBackend: PlatformBackend = {
     },
 
     rmdirSync(path: string): void {
-        const result = getWindowsApi().RemoveDirectoryW(Memory.allocUtf16String(path));
+        const result = getWindowsApi().RemoveDirectory(allocWindowsString(path));
         if (result.value === 0)
             throwWindowsError(result.lastError);
     },
 
     unlinkSync(path: string): void {
-        const result = getWindowsApi().DeleteFileW(Memory.allocUtf16String(path));
+        const result = getWindowsApi().DeleteFile(allocWindowsString(path));
         if (result.value === 0)
             throwWindowsError(result.lastError);
     },
@@ -394,30 +403,49 @@ const windowsBackend: PlatformBackend = {
     },
 
     lstatSync(path: string): Stats {
+        if (usesAnsiWindowsApi())
+            return makeStatsProxy(path, isWindowsDriveRoot(path) ? windowsDirectoryAttributes() : findWindowsFileAttributes(path));
+
         const getFileExInfoStandard = 0;
-        const buf = Memory.alloc(36);
-        const result = getWindowsApi().GetFileAttributesExW(Memory.allocUtf16String(path), getFileExInfoStandard, buf);
+        const buf = Memory.alloc(WIN32_FILE_ATTRIBUTE_DATA_SIZE);
+        const result = getWindowsApi().GetFileAttributesEx(allocWindowsString(path), getFileExInfoStandard, buf);
         if (result.value === 0) {
-            if (result.lastError === ERROR_SHARING_VIOLATION) {
-                let fileAttrData: NativePointer;
-                enumerateWindowsDirectoryEntriesMatching(path, data => {
-                    // WIN32_FIND_DATAW starts with the exact same fields as WIN32_FILE_ATTRIBUTE_DATA
-                    fileAttrData = Memory.dup(data, 36);
-                });
-                return makeStatsProxy(path, fileAttrData!);
-            }
+            if (result.lastError === ERROR_SHARING_VIOLATION)
+                return makeStatsProxy(path, findWindowsFileAttributes(path));
             throwWindowsError(result.lastError);
         }
         return makeStatsProxy(path, buf);
     },
 };
 
+function findWindowsFileAttributes(path: string): NativePointer {
+    let fileAttributeData: NativePointer;
+    enumerateWindowsDirectoryEntriesMatching(path, findData => {
+        fileAttributeData = fileAttributeDataLeading(findData);
+    });
+    return fileAttributeData!;
+}
+
+function fileAttributeDataLeading(findData: NativePointer): NativePointer {
+    return Memory.dup(findData, WIN32_FILE_ATTRIBUTE_DATA_SIZE);
+}
+
+function windowsDirectoryAttributes(): NativePointer {
+    const data = Memory.alloc(WIN32_FILE_ATTRIBUTE_DATA_SIZE);
+    data.writeU32(FILE_ATTRIBUTE_DIRECTORY);
+    return data;
+}
+
+function isWindowsDriveRoot(path: string): boolean {
+    return /^[A-Za-z]:\\?$/.test(path);
+}
+
 function enumerateWindowsDirectoryEntriesMatching(filename: string, callback: (entry: NativePointer) => void): void {
-    const { FindFirstFileW, FindNextFileW, FindClose } = getWindowsApi();
+    const { FindFirstFile, FindNextFile, FindClose } = getWindowsApi();
 
     const data = Memory.alloc(592);
 
-    const result = FindFirstFileW(Memory.allocUtf16String(filename), data);
+    const result = FindFirstFile(allocWindowsString(filename), data);
     const handle = result.value;
     if (handle.equals(INVALID_HANDLE_VALUE))
         throwWindowsError(result.lastError);
@@ -425,7 +453,7 @@ function enumerateWindowsDirectoryEntriesMatching(filename: string, callback: (e
     try {
         do {
             callback(data);
-        } while (FindNextFileW(handle, data) !== 0);
+        } while (FindNextFile(handle, data) !== 0);
     } finally {
         FindClose(handle);
     }
@@ -607,7 +635,7 @@ type DirentFieldSpec<T> = [
 
 const direntSpecs: { [abi: string]: DirentSpec; } = {
     "windows": {
-        "d_name": [44, "Utf16String"],
+        "d_name": [44, readWindowsFileName],
         "d_type": [0, readWindowsFileAttributes],
         "atime": [12, readWindowsFileTime],
         "mtime": [20, readWindowsFileTime],
@@ -1058,6 +1086,10 @@ function statsReadField<T>(this: Stats, name: string, path: string): number | UI
     return value;
 }
 
+function readWindowsFileName(this: NativePointer): string {
+    return readWindowsString(this);
+}
+
 function readWindowsFileAttributes(this: NativePointer, path?: string): number {
     const attributes = this.readU32();
 
@@ -1139,10 +1171,29 @@ function makeWindowsError(lastError: number): Error {
     const FORMAT_MESSAGE_IGNORE_INSERTS = 0x00000200;
 
     const buf = Memory.alloc(maxLength * 2);
-    getWindowsApi().FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+    getWindowsApi().FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
         NULL, lastError, 0, buf, maxLength, NULL);
 
-    return new Error(buf.readUtf16String()!);
+    return new Error(readWindowsString(buf));
+}
+
+function windowsStreamFlags(): number {
+    return usesAnsiWindowsApi() ? 0 : FILE_FLAG_OVERLAPPED;
+}
+
+function _usesAnsiWindowsApi(): boolean {
+    if (!isWindows)
+        return false;
+    const getVersion = new NativeFunction(kernel32Module().getExportByName("GetVersion"), "uint", [], nativeOpts);
+    return (getVersion() & 0x80000000) !== 0;
+}
+
+function allocWindowsString(str: string): NativePointer {
+    return usesAnsiWindowsApi() ? Memory.allocAnsiString(str) : Memory.allocUtf16String(str);
+}
+
+function readWindowsString(address: NativePointer): string {
+    return (usesAnsiWindowsApi() ? address.readAnsiString() : address.readUtf16String())!;
 }
 
 function makePosixError(errno: number): Error {
@@ -1179,43 +1230,44 @@ const sizeType = "u" + ssizeType;
 const offsetType = (platform === "darwin" || pointerSize === 8) ? "int64" : "int32";
 
 interface WindowsApi {
-    CreateFileW(fileName: NativePointerValue, desiredAccess: number, shareMode: number, securityAttributes: NativePointerValue,
+    CreateFile(fileName: NativePointerValue, desiredAccess: number, shareMode: number, securityAttributes: NativePointerValue,
         creationDisposition: number, flagsAndAttributes: number, templateFile: NativePointerValue)
         : WindowsSystemFunctionResult<NativePointer>;
-    DeleteFileW(fileName: NativePointerValue): WindowsSystemFunctionResult<number>;
+    DeleteFile(fileName: NativePointerValue): WindowsSystemFunctionResult<number>;
     GetFileSizeEx(file: NativePointerValue, fileSize: NativePointerValue): WindowsSystemFunctionResult<number>;
     ReadFile(file: NativePointerValue, buffer: NativePointerValue, numberOfBytesToRead: number, numberOfBytesRead: NativePointerValue,
         overlapped: NativePointerValue): WindowsSystemFunctionResult<number>;
-    RemoveDirectoryW(pathName: NativePointerValue): WindowsSystemFunctionResult<number>;
+    RemoveDirectory(pathName: NativePointerValue): WindowsSystemFunctionResult<number>;
     CloseHandle(object: NativePointerValue): number;
-    FindFirstFileW(fileName: NativePointerValue, findFileData: NativePointerValue): WindowsSystemFunctionResult<NativePointer>;
-    FindNextFileW(findFile: NativePointerValue, findFileData: NativePointerValue): number;
+    FindFirstFile(fileName: NativePointerValue, findFileData: NativePointerValue): WindowsSystemFunctionResult<NativePointer>;
+    FindNextFile(findFile: NativePointerValue, findFileData: NativePointerValue): number;
     FindClose(findFile: NativePointerValue): number;
-    GetFileAttributesExW(fileName: NativePointerValue, infoLevelId: number, fileInformation: NativePointerValue)
+    GetFileAttributesEx(fileName: NativePointerValue, infoLevelId: number, fileInformation: NativePointerValue)
         : WindowsSystemFunctionResult<number>;
-    GetFinalPathNameByHandleW(file: NativePointerValue, filePathBuf: NativePointerValue, filePathLen: number, flags: number)
+    GetFinalPathNameByHandle(file: NativePointerValue, filePathBuf: NativePointerValue, filePathLen: number, flags: number)
         : WindowsSystemFunctionResult<number>;
-    FormatMessageW(flags: number, source: NativePointerValue, messageId: number, languageId: number, buffer: NativePointerValue,
+    FormatMessage(flags: number, source: NativePointerValue, messageId: number, languageId: number, buffer: NativePointerValue,
         size: number, args: NativePointerValue): number;
 }
 
 function _getWindowsApi(): WindowsApi {
     const SF = SystemFunction;
     const NF = NativeFunction;
+    const charset = usesAnsiWindowsApi() ? "A" : "W";
 
     return makeApi<WindowsApi>([
-        ["CreateFileW", SF, "pointer", ["pointer", "uint", "uint", "pointer", "uint", "uint", "pointer"]],
-        ["DeleteFileW", SF, "uint", ["pointer"]],
+        ["CreateFile", SF, "pointer", ["pointer", "uint", "uint", "pointer", "uint", "uint", "pointer"], undefined, "CreateFile" + charset],
+        ["DeleteFile", SF, "uint", ["pointer"], undefined, "DeleteFile" + charset],
         ["GetFileSizeEx", SF, "uint", ["pointer", "pointer"]],
         ["ReadFile", SF, "uint", ["pointer", "pointer", "uint", "pointer", "pointer"]],
-        ["RemoveDirectoryW", SF, "uint", ["pointer"]],
+        ["RemoveDirectory", SF, "uint", ["pointer"], undefined, "RemoveDirectory" + charset],
         ["CloseHandle", NF, "uint", ["pointer"]],
-        ["FindFirstFileW", SF, "pointer", ["pointer", "pointer"]],
-        ["FindNextFileW", NF, "uint", ["pointer", "pointer"]],
+        ["FindFirstFile", SF, "pointer", ["pointer", "pointer"], undefined, "FindFirstFile" + charset],
+        ["FindNextFile", NF, "uint", ["pointer", "pointer"], undefined, "FindNextFile" + charset],
         ["FindClose", NF, "uint", ["pointer"]],
-        ["GetFileAttributesExW", SF, "uint", ["pointer", "uint", "pointer"]],
-        ["GetFinalPathNameByHandleW", SF, "uint", ["pointer", "pointer", "uint", "uint"]],
-        ["FormatMessageW", NF, "uint", ["uint", "pointer", "uint", "uint", "pointer", "uint", "pointer"]],
+        ["GetFileAttributesEx", SF, "uint", ["pointer", "uint", "pointer"], undefined, "GetFileAttributesEx" + charset],
+        ["GetFinalPathNameByHandle", SF, "uint", ["pointer", "pointer", "uint", "uint"], undefined, "GetFinalPathNameByHandle" + charset],
+        ["FormatMessage", NF, "uint", ["uint", "pointer", "uint", "uint", "pointer", "uint", "pointer"], undefined, "FormatMessage" + charset],
     ]);
 }
 
@@ -1285,7 +1337,8 @@ type WrappedApiSpecEntry = [
     ctor: SystemFunctionConstructor | NativeFunctionConstructor,
     retType: NativeFunctionReturnType,
     argTypes: NativeFunctionArgumentType[],
-    wrapper: (...args: any[]) => any,
+    wrapper: ((...args: any[]) => any) | undefined,
+    exportName?: string,
 ];
 
 function makeApi<T>(spec: ApiSpec): T {
@@ -1296,6 +1349,13 @@ function makeApi<T>(spec: ApiSpec): T {
 }
 
 let kernel32: Module | null = null;
+
+function kernel32Module(): Module {
+    if (kernel32 === null)
+        kernel32 = Process.getModuleByName("kernel32.dll");
+    return kernel32;
+}
+
 const nativeOpts: NativeFunctionOptions = (isWindows && pointerSize === 4) ? { abi: "stdcall" } : {};
 
 function addApiPlaceholder<T>(api: T, entry: ApiSpecEntry): void {
@@ -1303,15 +1363,12 @@ function addApiPlaceholder<T>(api: T, entry: ApiSpecEntry): void {
     Object.defineProperty(api, name, {
         configurable: true,
         get() {
-            const [, Ctor, retType, argTypes, wrapper] = entry;
-
-            if (isWindows && kernel32 === null)
-                kernel32 = Process.getModuleByName("kernel32.dll");
+            const [, Ctor, retType, argTypes, wrapper, exportName = name] = entry as WrappedApiSpecEntry;
 
             let impl = null;
             const address = isWindows
-                ? kernel32!.findExportByName(name)
-                : Module.findGlobalExportByName(name);
+                ? kernel32Module().findExportByName(exportName)
+                : Module.findGlobalExportByName(exportName);
             if (address !== null)
                 impl = new Ctor(address, retType, argTypes, nativeOpts);
 
