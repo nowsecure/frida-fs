@@ -673,11 +673,11 @@ export interface DirectoryEntry {
     size?: number;
 }
 
-function readDirentField<T>(entry: NativePointer, name: DirentFieldName, ...args: any[]) {
+function readDirentField<T = any>(entry: NativePointer, name: DirentFieldName, ...args: any[]) : any {
     const fieldSpec = direntSpec[name] as DirentFieldSpec<T>;
     const [offset, type] = fieldSpec;
 
-    const target = this.buffer.add(offset);
+    const target = entry.add(offset);
     const value = (typeof type === "string")
         ? target[`read${type}` as const]()
         : type.call(target, ...args);
@@ -1033,7 +1033,7 @@ function statsHasField(name: string): boolean {
     return statFields.has(name);
 }
 
-function statsReadField<T>(this: Stats, name: string, path: string): number | UInt64 | Date | undefined {
+function statsReadField<T extends number | UInt64 | Date>(this: Stats, name: string, path: string): number | UInt64 | Date | undefined {
     let field: StatFieldSpec<T> | undefined = (getStatSpec().fields as any)[name];
     if (field === undefined) {
         if (name === "birthtime") {
