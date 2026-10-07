@@ -1048,9 +1048,10 @@ function statsReadField<T>(this: Stats, name: string, path: string): number | UI
 
     const [offset, type] = field;
 
-    const read = (typeof type === "string") ? (NativePointer.prototype as any)["read" + type] : type;
-
-    const value = read.call(this.buffer.add(offset), path);
+    const address = this.buffer.add(offset);
+    const value = (typeof type === "string")
+        ? (NativePointer.prototype as any)["read" + type].call(address)
+        : type.call(address, path);
     if (value instanceof Int64 || value instanceof UInt64)
         return value.valueOf();
 
