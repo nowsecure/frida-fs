@@ -677,9 +677,11 @@ function readDirentField<T>(entry: NativePointer, name: DirentFieldName, ...args
     const fieldSpec = direntSpec[name] as DirentFieldSpec<T>;
     const [offset, type] = fieldSpec;
 
-    const read = (typeof type === "string") ? (NativePointer.prototype as any)["read" + type] : type;
+    const target = this.buffer.add(offset);
+    const value = (typeof type === "string")
+        ? target[`read${type}` as const]()
+        : type.call(target, ...args);
 
-    const value = read.call(entry.add(offset), ...args);
     if (value instanceof Int64 || value instanceof UInt64)
         return value.valueOf();
 
@@ -1048,9 +1050,11 @@ function statsReadField<T>(this: Stats, name: string, path: string): number | UI
 
     const [offset, type] = field;
 
-    const read = (typeof type === "string") ? (NativePointer.prototype as any)["read" + type] : type;
+    const target = this.buffer.add(offset);
+    const value = (typeof type === "string")
+        ? target[`read${type}` as const]()
+        : type.call(target, path);
 
-    const value = read.call(this.buffer.add(offset), path);
     if (value instanceof Int64 || value instanceof UInt64)
         return value.valueOf();
 
