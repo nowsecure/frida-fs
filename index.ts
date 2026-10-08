@@ -1380,7 +1380,7 @@ function addApiPlaceholder<T>(api: T, entry: ApiSpecEntry): void {
             if (address !== null)
                 impl = new Ctor(address, retType, argTypes, nativeOpts);
 
-            if (wrapper !== undefined)
+            if (wrapper !== undefined && impl !== null)
                 impl = wrapper.bind(null, impl);
 
             Object.defineProperty(api, name, { value: impl });
