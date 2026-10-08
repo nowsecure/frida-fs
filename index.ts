@@ -666,6 +666,8 @@ function readdirSync(path: string): string[] {
     const entries: string[] = [];
     enumerateDirectoryEntries(path, entry => {
         const name = readDirentField(entry, "d_name");
+        if (isCurrentOrParentDirectory(name))
+            return;
         entries.push(name);
     });
     return entries;
@@ -677,6 +679,8 @@ function list(path: string): DirectoryEntry[] {
     const entries: DirectoryEntry[] = [];
     enumerateDirectoryEntries(path, entry => {
         const name = readDirentField(entry, "d_name");
+        if (isCurrentOrParentDirectory(name))
+            return;
         const type = readDirentField(entry, "d_type", fsPath.join(path, name));
 
         const extras: Partial<DirectoryEntry> = {};
@@ -690,6 +694,10 @@ function list(path: string): DirectoryEntry[] {
         });
     });
     return entries;
+}
+
+function isCurrentOrParentDirectory(name: string): boolean {
+    return name === "." || name === "..";
 }
 
 export interface DirectoryEntry {
