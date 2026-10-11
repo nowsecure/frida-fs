@@ -24,8 +24,10 @@ TESTLIST_BEGIN (basics)
   TESTENTRY (copy_file_should_honor_excl)
   TESTENTRY (truncate_should_resize)
   TESTENTRY (utimes_should_set_times)
+#ifndef G_OS_WIN32
   TESTENTRY (read_stream_should_support_range)
   TESTENTRY (read_stream_should_support_start_without_end)
+#endif
   TESTENTRY (read_stream_should_support_end_without_start)
   TESTENTRY (read_stream_should_honor_high_water_mark)
   TESTENTRY (read_stream_should_reject_inverted_range)
@@ -268,6 +270,8 @@ TESTCASE (utimes_should_set_times)
   g_free (dir);
 }
 
+#ifndef G_OS_WIN32
+
 TESTCASE (read_stream_should_support_range)
 {
   gchar * dir = g_dir_make_tmp (NULL, NULL);
@@ -303,6 +307,8 @@ TESTCASE (read_stream_should_support_start_without_end)
   remove_tree (dir);
   g_free (dir);
 }
+
+#endif
 
 TESTCASE (read_stream_should_support_end_without_start)
 {
