@@ -14,7 +14,25 @@ TESTLIST_BEGIN (basics)
   TESTENTRY (stat_should_support_character_devices)
   TESTENTRY (stat_should_support_symbolic_links)
 #endif
+  TESTENTRY (mkdir_should_create_directory)
+  TESTENTRY (mkdir_should_fail_on_existing_directory)
+  TESTENTRY (mkdir_should_support_recursive)
+  TESTENTRY (append_file_should_append)
+  TESTENTRY (exists_should_report_presence)
+  TESTENTRY (rename_should_replace_destination)
+  TESTENTRY (copy_file_should_replace_destination)
+  TESTENTRY (copy_file_should_honor_excl)
+  TESTENTRY (truncate_should_resize)
+  TESTENTRY (utimes_should_set_times)
+#ifdef G_OS_UNIX
+  TESTENTRY (chmod_should_set_mode)
+  TESTENTRY (symlink_should_create_link)
+  TESTENTRY (realpath_should_resolve_links)
+  TESTENTRY (access_should_check_mode)
+#endif
 TESTLIST_END ()
+
+static void remove_tree (const gchar * path);
 
 TESTCASE (stat_should_support_files)
 {
@@ -74,3 +92,266 @@ TESTCASE (stat_should_support_symbolic_links)
 }
 
 #endif
+
+TESTCASE (mkdir_should_create_directory)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "const path = '%s/child';"
+      "fs.mkdirSync(path);"
+      "send(fs.statSync(path).isDirectory());",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("true");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+TESTCASE (mkdir_should_fail_on_existing_directory)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "try {"
+      "  fs.mkdirSync('%s');"
+      "  send('created');"
+      "} catch (e) {"
+      "  send('failed');"
+      "}",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("\"failed\"");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+TESTCASE (mkdir_should_support_recursive)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "const path = '%s/a/b/c';"
+      "fs.mkdirSync(path, { recursive: true });"
+      "fs.mkdirSync(path, { recursive: true });"
+      "send(fs.statSync(path).isDirectory());",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("true");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+TESTCASE (append_file_should_append)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "const path = '%s/file';"
+      "fs.writeFileSync(path, 'Hello');"
+      "fs.appendFileSync(path, ' world');"
+      "send(fs.readFileSync(path, 'utf8'));",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("\"Hello world\"");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+TESTCASE (exists_should_report_presence)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "const dir = '%s';"
+      "send([fs.existsSync(dir), fs.existsSync(dir + '/missing')]);",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("[true,false]");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+TESTCASE (rename_should_replace_destination)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "const dir = '%s';"
+      "fs.writeFileSync(dir + '/a', 'new');"
+      "fs.writeFileSync(dir + '/b', 'old');"
+      "fs.renameSync(dir + '/a', dir + '/b');"
+      "send([fs.existsSync(dir + '/a'), fs.readFileSync(dir + '/b', 'utf8')]);",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("[false,\"new\"]");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+TESTCASE (copy_file_should_replace_destination)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "const dir = '%s';"
+      "fs.writeFileSync(dir + '/a', 'new');"
+      "fs.writeFileSync(dir + '/b', 'much older');"
+      "fs.copyFileSync(dir + '/a', dir + '/b');"
+      "send([fs.readFileSync(dir + '/a', 'utf8'), fs.readFileSync(dir + '/b', 'utf8')]);",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("[\"new\",\"new\"]");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+TESTCASE (copy_file_should_honor_excl)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "const dir = '%s';"
+      "fs.writeFileSync(dir + '/a', 'new');"
+      "fs.writeFileSync(dir + '/b', 'old');"
+      "try {"
+      "  fs.copyFileSync(dir + '/a', dir + '/b', fs.constants.COPYFILE_EXCL);"
+      "  send('copied');"
+      "} catch (e) {"
+      "  send(fs.readFileSync(dir + '/b', 'utf8'));"
+      "}",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("\"old\"");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+TESTCASE (truncate_should_resize)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "const path = '%s/file';"
+      "fs.writeFileSync(path, 'Hello world');"
+      "fs.truncateSync(path, 5);"
+      "const shrunk = fs.readFileSync(path, 'utf8');"
+      "fs.truncateSync(path, 8);"
+      "const grown = fs.statSync(path).size;"
+      "fs.truncateSync(path);"
+      "send([shrunk, grown, fs.statSync(path).size]);",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("[\"Hello\",8,0]");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+TESTCASE (utimes_should_set_times)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "const path = '%s/file';"
+      "fs.writeFileSync(path, '');"
+      "fs.utimesSync(path, new Date(1500000000000), new Date(1600000000000));"
+      "send(fs.statSync(path).mtimeMs);",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("1600000000000");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+#ifdef G_OS_UNIX
+
+TESTCASE (chmod_should_set_mode)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "const path = '%s/file';"
+      "fs.writeFileSync(path, '');"
+      "fs.chmodSync(path, 0o640);"
+      "send((fs.statSync(path).mode & 0o777).toString(8));",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("\"640\"");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+TESTCASE (symlink_should_create_link)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "const dir = '%s';"
+      "fs.symlinkSync('target', dir + '/link');"
+      "send([fs.lstatSync(dir + '/link').isSymbolicLink(), fs.readlinkSync(dir + '/link')]);",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("[true,\"target\"]");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+TESTCASE (realpath_should_resolve_links)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "const dir = fs.realpathSync('%s');"
+      "fs.writeFileSync(dir + '/target', '');"
+      "fs.symlinkSync('target', dir + '/link');"
+      "send(fs.realpathSync(dir + '/link') === dir + '/target');",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("true");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+TESTCASE (access_should_check_mode)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "const path = '%s/file';"
+      "fs.writeFileSync(path, '');"
+      "fs.accessSync(path, fs.constants.R_OK | fs.constants.W_OK);"
+      "try {"
+      "  fs.accessSync(path, fs.constants.X_OK);"
+      "  send('executable');"
+      "} catch (e) {"
+      "  send('denied');"
+      "}",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("\"denied\"");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+#endif
+
+static void
+remove_tree (const gchar * path)
+{
+  GDir * dir;
+  const gchar * name;
+
+  dir = g_dir_open (path, 0, NULL);
+  if (dir != NULL)
+  {
+    while ((name = g_dir_read_name (dir)) != NULL)
+    {
+      gchar * child = g_build_filename (path, name, NULL);
+      remove_tree (child);
+      g_free (child);
+    }
+    g_dir_close (dir);
+  }
+
+  g_remove (path);
+}
