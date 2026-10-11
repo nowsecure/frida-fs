@@ -24,6 +24,11 @@ TESTLIST_BEGIN (basics)
   TESTENTRY (copy_file_should_honor_excl)
   TESTENTRY (truncate_should_resize)
   TESTENTRY (utimes_should_set_times)
+  TESTENTRY (read_stream_should_support_range)
+  TESTENTRY (read_stream_should_support_start_without_end)
+  TESTENTRY (read_stream_should_support_end_without_start)
+  TESTENTRY (read_stream_should_honor_high_water_mark)
+  TESTENTRY (read_stream_should_reject_inverted_range)
 #ifdef G_OS_UNIX
   TESTENTRY (chmod_should_set_mode)
   TESTENTRY (symlink_should_create_link)
@@ -261,6 +266,90 @@ TESTCASE (utimes_should_set_times)
 
   remove_tree (dir);
   g_free (dir);
+}
+
+TESTCASE (read_stream_should_support_range)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "const path = '%s/file';"
+      "fs.writeFileSync(path, 'Hello world');"
+      "const chunks = [];"
+      "fs.createReadStream(path, { start: 6, end: 9 })"
+      "    .on('data', chunk => chunks.push(chunk.toString()))"
+      "    .on('end', () => send(chunks.join('')));",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("\"worl\"");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+TESTCASE (read_stream_should_support_start_without_end)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "const path = '%s/file';"
+      "fs.writeFileSync(path, 'Hello world');"
+      "const chunks = [];"
+      "fs.createReadStream(path, { start: 6 })"
+      "    .on('data', chunk => chunks.push(chunk.toString()))"
+      "    .on('end', () => send(chunks.join('')));",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("\"world\"");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+TESTCASE (read_stream_should_support_end_without_start)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "const path = '%s/file';"
+      "fs.writeFileSync(path, 'Hello world');"
+      "const chunks = [];"
+      "fs.createReadStream(path, { end: 4 })"
+      "    .on('data', chunk => chunks.push(chunk.toString()))"
+      "    .on('end', () => send(chunks.join('')));",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("\"Hello\"");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+TESTCASE (read_stream_should_honor_high_water_mark)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT (
+      "const path = '%s/file';"
+      "fs.writeFileSync(path, 'Hello world');"
+      "const sizes = [];"
+      "fs.createReadStream(path, { highWaterMark: 4 })"
+      "    .on('data', chunk => sizes.push(chunk.length))"
+      "    .on('end', () => send(sizes));",
+      ESCAPE_PATH (dir));
+  EXPECT_SEND_MESSAGE_WITH ("[4,4,3]");
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+TESTCASE (read_stream_should_reject_inverted_range)
+{
+  COMPILE_AND_LOAD_SCRIPT (
+      "try {"
+      "  fs.createReadStream('/nonexistent', { start: 5, end: 4 });"
+      "  send('created');"
+      "} catch (e) {"
+      "  send(e.name);"
+      "}");
+  EXPECT_SEND_MESSAGE_WITH ("\"RangeError\"");
 }
 
 #ifdef G_OS_UNIX

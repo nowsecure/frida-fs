@@ -155,14 +155,24 @@ const SEEK_END = 2;
 const EEXIST = 17;
 const EINTR = 4;
 
+type ReadStreamOptions = {
+    highWaterMark?: number;
+    start?: number;
+    end?: number;
+};
+
 class ReadStream extends stream.Readable {
     #input: InputStream | null = null;
     #readRequest: Promise<void> | null = null;
+    #remaining: number;
 
-    constructor(path: string) {
-        super({
-            highWaterMark: 4 * 1024 * 1024
-        });
+    constructor(path: string, { highWaterMark = 4 * 1024 * 1024, start = 0, end = Infinity }: ReadStreamOptions = {}) {
+        if (start > end)
+            throw new RangeError(`The value of "start" (${start}) must be <= "end" (${end})`);
+
+        super({ highWaterMark });
+
+        this.#remaining = end - start + 1;
 
         if (isWindows) {
             const api = getWindowsApi();
@@ -184,6 +194,15 @@ class ReadStream extends stream.Readable {
                 return;
             }
 
+            const seekError = (start !== 0) ? seekWindowsFile(handle, start) : NO_ERROR;
+            if (seekError !== NO_ERROR) {
+                api.CloseHandle(handle);
+                process.nextTick(() => {
+                    this.destroy(makeWindowsError(seekError));
+                });
+                return;
+            }
+
             this.#input = new Win32InputStream(handle, { autoClose: true });
         } else {
             const api = getPosixApi();
@@ -194,6 +213,15 @@ class ReadStream extends stream.Readable {
             if (fd === -1) {
                 process.nextTick(() => {
                     this.destroy(makePosixError(result.errno));
+                });
+                return;
+            }
+
+            const seekError = (start !== 0) ? seekPosixFile(fd, start) : 0;
+            if (seekError !== 0) {
+                api.close(fd);
+                process.nextTick(() => {
+                    this.destroy(makePosixError(seekError));
                 });
                 return;
             }
@@ -213,9 +241,15 @@ class ReadStream extends stream.Readable {
         if (this.#readRequest !== null)
             return;
 
-        this.#readRequest = this.#input!.read(size)
+        if (this.#remaining === 0) {
+            this.push(null);
+            return;
+        }
+
+        this.#readRequest = this.#input!.read(Math.min(size, this.#remaining))
             .then(buffer => {
                 this.#readRequest = null;
+                this.#remaining -= buffer.byteLength;
 
                 if (buffer.byteLength === 0) {
                     this.push(null);
@@ -522,7 +556,7 @@ const windowsBackend: PlatformBackend = {
     },
 
     truncateSync(path: string, length: number): void {
-        const { CreateFile, SetFilePointer, SetEndOfFile, CloseHandle } = getWindowsApi();
+        const { CreateFile, SetEndOfFile, CloseHandle } = getWindowsApi();
 
         const createRes = CreateFile(
             allocWindowsString(path),
@@ -537,11 +571,9 @@ const windowsBackend: PlatformBackend = {
             throwWindowsError(createRes.lastError);
 
         try {
-            const distanceHigh = Memory.alloc(4);
-            distanceHigh.writeS32(Math.floor(length / 0x100000000));
-            const seekRes = SetFilePointer(handle, length >>> 0, distanceHigh, FILE_BEGIN);
-            if (seekRes.value === INVALID_SET_FILE_POINTER && seekRes.lastError !== NO_ERROR)
-                throwWindowsError(seekRes.lastError);
+            const seekError = seekWindowsFile(handle, length);
+            if (seekError !== NO_ERROR)
+                throwWindowsError(seekError);
 
             const endRes = SetEndOfFile(handle);
             if (endRes.value === 0)
@@ -599,6 +631,13 @@ function finalWindowsPath(path: string): string {
     } finally {
         CloseHandle(handle);
     }
+}
+
+function seekWindowsFile(handle: NativePointer, offset: number): number {
+    const distanceHigh = Memory.alloc(4);
+    distanceHigh.writeS32(Math.floor(offset / 0x100000000));
+    const result = getWindowsApi().SetFilePointer(handle, offset >>> 0, distanceHigh, FILE_BEGIN);
+    return (result.value === INVALID_SET_FILE_POINTER) ? result.lastError : NO_ERROR;
 }
 
 function getWindowsFileAttributes(path: string): number {
@@ -693,7 +732,7 @@ const posixBackend: PlatformBackend = {
             throwPosixError(openResult.errno);
 
         try {
-            const fileSize = lseek(fd, 0, SEEK_END).valueOf();
+            const fileSize = lseek(fd, 0, SEEK_END).value.valueOf();
 
             lseek(fd, 0, SEEK_SET);
 
@@ -828,6 +867,11 @@ const posixBackend: PlatformBackend = {
             throwPosixError(result.errno);
     },
 };
+
+function seekPosixFile(fd: number, offset: number): number {
+    const result = getPosixApi().lseek(fd, offset, SEEK_SET);
+    return (result.value.valueOf() === -1) ? result.errno : 0;
+}
 
 function writeTimeval(base: NativePointer, offset: number, date: Date): void {
     const milliseconds = date.getTime();
@@ -1709,7 +1753,7 @@ function _getWindowsApi(): WindowsApi {
 interface PosixApi {
     open(path: NativePointerValue, oflag: number, mode: number): UnixSystemFunctionResult<number>;
     close(fd: number): number;
-    lseek(fd: number, offset: number | Int64, whence: number): number | Int64;
+    lseek(fd: number, offset: number | Int64, whence: number): UnixSystemFunctionResult<number | Int64>;
     read(fd: number, buf: NativePointerValue, count: number | UInt64): UnixSystemFunctionResult<number | Int64>;
     opendir(name: NativePointerValue): UnixSystemFunctionResult<NativePointer>;
     opendir$INODE64(name: NativePointerValue): UnixSystemFunctionResult<NativePointer>;
@@ -1745,7 +1789,7 @@ function _getPosixApi(): PosixApi {
     return makeApi<PosixApi>([
         ["open", SF, "int", ["pointer", "int", "...", "int"]],
         ["close", NF, "int", ["int"]],
-        ["lseek", NF, offsetType, ["int", offsetType, "int"]],
+        ["lseek", SF, offsetType, ["int", offsetType, "int"]],
         ["read", SF, ssizeType, ["int", "pointer", sizeType as NativeFunctionArgumentType]],
         ["opendir", SF, "pointer", ["pointer"]],
         ["opendir$INODE64", SF, "pointer", ["pointer"]],
@@ -1837,8 +1881,8 @@ function addApiPlaceholder<T>(api: T, entry: ApiSpecEntry): void {
     });
 }
 
-export function createReadStream(path: string): ReadStream {
-    return new ReadStream(path);
+export function createReadStream(path: string, options?: ReadStreamOptions): ReadStream {
+    return new ReadStream(path, options);
 }
 
 export function createWriteStream(path: string): WriteStream {
