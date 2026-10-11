@@ -778,8 +778,8 @@ const posixBackend: PlatformBackend = {
     utimesSync(path: string, atime: Date, mtime: Date): void {
         const timevalSize = 2 * pointerSize;
         const times = Memory.alloc(2 * timevalSize);
-        writeTimeval(times, atime);
-        writeTimeval(times.add(timevalSize), mtime);
+        writeTimeval(times, 0, atime);
+        writeTimeval(times, timevalSize, mtime);
 
         const result = getPosixApi().utimes(Memory.allocUtf8String(path), times);
         if (result.value === -1)
@@ -829,16 +829,16 @@ const posixBackend: PlatformBackend = {
     },
 };
 
-function writeTimeval(timeval: NativePointer, date: Date): void {
+function writeTimeval(base: NativePointer, offset: number, date: Date): void {
     const milliseconds = date.getTime();
     const seconds = Math.floor(milliseconds / 1000);
     const microseconds = (milliseconds - (seconds * 1000)) * 1000;
     if (pointerSize === 8) {
-        timeval.writeS64(seconds);
-        timeval.add(8).writeS64(microseconds);
+        base.writeS64(seconds, offset);
+        base.writeS64(microseconds, offset + 8);
     } else {
-        timeval.writeS32(seconds);
-        timeval.add(4).writeS32(microseconds);
+        base.writeS32(seconds, offset);
+        base.writeS32(microseconds, offset + 4);
     }
 }
 
@@ -1019,8 +1019,10 @@ type DirentExtraName = keyof Omit<DirentSpec, "d_name" | "d_type">;
 
 type DirentFieldSpec<T> = [
     offset: number,
-    read: "Utf8String" | "Utf16String" | "U8" | ((this: NativePointer, path?: string) => T)
+    read: "Utf8String" | "Utf16String" | "U8" | FieldReader<T>
 ];
+
+type FieldReader<T> = (base: NativePointer, offset: number, path?: string) => T;
 
 const direntSpecs: { [abi: string]: DirentSpec; } = {
     "windows": {
@@ -1102,9 +1104,9 @@ function readDirentField<T>(entry: NativePointer, name: DirentFieldName, ...args
     const fieldSpec = direntSpec[name] as DirentFieldSpec<T>;
     const [offset, type] = fieldSpec;
 
-    const read = (typeof type === "string") ? (NativePointer.prototype as any)["read" + type] : type;
+    const read: FieldReader<any> = (typeof type === "string") ? primitiveFieldReaders[type] : type;
 
-    const value = read.call(entry.add(offset), ...args);
+    const value = read(entry, offset, ...args);
     if (value instanceof Int64 || value instanceof UInt64)
         return value.valueOf();
 
@@ -1137,7 +1139,7 @@ interface StatSpec {
 
 type StatFieldSpec<T> = [
     offset: number,
-    read: "U16" | "S32" | "U32" | "S64" | "U64" | ((this: NativePointer, path: string) => T)
+    read: "U16" | "S32" | "U32" | "S64" | "U64" | FieldReader<T>
 ];
 
 const statFields = new Set([
@@ -1473,27 +1475,36 @@ function statsReadField<T>(this: Stats, name: string, path: string): number | UI
 
     const [offset, type] = field;
 
-    const address = this.buffer.add(offset);
-    const value = (typeof type === "string")
-        ? (NativePointer.prototype as any)["read" + type].call(address)
-        : type.call(address, path);
+    const read: FieldReader<any> = (typeof type === "string") ? primitiveFieldReaders[type] : type;
+    const value = read(this.buffer, offset, path);
     if (value instanceof Int64 || value instanceof UInt64)
         return value.valueOf();
 
     return value;
 }
 
-function readWindowsFileName(this: NativePointer): string {
-    return readWindowsString(this);
+const primitiveFieldReaders = {
+    U8: (base: NativePointer, offset: number) => base.readU8(offset),
+    U16: (base: NativePointer, offset: number) => base.readU16(offset),
+    S32: (base: NativePointer, offset: number) => base.readS32(offset),
+    U32: (base: NativePointer, offset: number) => base.readU32(offset),
+    S64: (base: NativePointer, offset: number) => base.readS64(offset),
+    U64: (base: NativePointer, offset: number) => base.readU64(offset),
+    Utf8String: (base: NativePointer, offset: number) => base.readUtf8String(-1, offset),
+    Utf16String: (base: NativePointer, offset: number) => base.readUtf16String(-1, offset),
+};
+
+function readWindowsFileName(base: NativePointer, offset: number): string {
+    return readWindowsString(base, offset);
 }
 
-function readWindowsFileAttributes(this: NativePointer, path?: string): number {
-    const attributes = this.readU32();
+function readWindowsFileAttributes(base: NativePointer, offset: number, path?: string): number {
+    const attributes = base.readU32(offset);
 
     let isLink = false;
     if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) !== 0) {
         enumerateWindowsDirectoryEntriesMatching(path!, data => {
-            const reserved0 = data.add(36).readU32();
+            const reserved0 = data.readU32(36);
             isLink = (reserved0 === IO_REPARSE_TAG_MOUNT_POINT || reserved0 === IO_REPARSE_TAG_SYMLINK);
         });
     }
@@ -1516,31 +1527,31 @@ function readWindowsFileAttributes(this: NativePointer, path?: string): number {
     return mode;
 }
 
-function readWindowsFileTime(this: NativePointer): Date {
-    const fileTime = BigInt(this.readU64().toString()).valueOf();
+function readWindowsFileTime(base: NativePointer, offset: number): Date {
+    const fileTime = BigInt(base.readU64(offset).toString()).valueOf();
     const ticksPerMsec = 10000n;
     const msecToUnixEpoch = 11644473600000n;
     const unixTime = (fileTime / ticksPerMsec) - msecToUnixEpoch;
     return new Date(parseInt(unixTime.toString()));
 }
 
-function readWindowsFileSize(this: NativePointer): UInt64 {
-    const high = this.readU32();
-    const low = this.add(4).readU32();
+function readWindowsFileSize(base: NativePointer, offset: number): UInt64 {
+    const high = base.readU32(offset);
+    const low = base.readU32(offset + 4);
     return uint64(high).shl(32).or(low);
 }
 
-function readTimespec32(this: NativePointer): Date {
-    const sec = this.readU32();
-    const nsec = this.add(4).readU32();
+function readTimespec32(base: NativePointer, offset: number): Date {
+    const sec = base.readU32(offset);
+    const nsec = base.readU32(offset + 4);
     const msec = nsec / 1000000;
     return new Date((sec * 1000) + msec);
 }
 
-function readTimespec64(this: NativePointer): Date {
+function readTimespec64(base: NativePointer, offset: number): Date {
     // FIXME: Improve UInt64 to support division
-    const sec = this.readU64().valueOf();
-    const nsec = this.add(8).readU64().valueOf();
+    const sec = base.readU64(offset).valueOf();
+    const nsec = base.readU64(offset + 8).valueOf();
     const msec = nsec / 1000000;
     return new Date((sec * 1000) + msec);
 }
@@ -1589,8 +1600,8 @@ function allocWindowsString(str: string): NativePointer {
     return usesAnsiWindowsApi() ? Memory.allocAnsiString(str) : Memory.allocUtf16String(str);
 }
 
-function readWindowsString(address: NativePointer): string {
-    return (usesAnsiWindowsApi() ? address.readAnsiString() : address.readUtf16String())!;
+function readWindowsString(address: NativePointer, offset: number = 0): string {
+    return (usesAnsiWindowsApi() ? address.readAnsiString(-1, offset) : address.readUtf16String(-1, offset))!;
 }
 
 function makePosixError(errno: number): Error {

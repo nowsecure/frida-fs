@@ -23,7 +23,7 @@
   },
   "homepage": "https://github.com/nowsecure/frida-fs#readme",
   "devDependencies": {
-    "@types/frida-gum": "^19.0.0",
+    "@types/frida-gum": "^19.12.0",
     "@types/node": "^18.15.3",
     "typescript": "^5.8.3"
   }
