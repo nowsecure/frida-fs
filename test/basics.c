@@ -8,6 +8,9 @@
 #include "fixture.c"
 
 TESTLIST_BEGIN (basics)
+#ifdef G_OS_WIN32
+  TESTENTRY (debug_read_stream)
+#endif
   TESTENTRY (stat_should_support_files)
   TESTENTRY (stat_should_support_directories)
 #ifdef G_OS_UNIX
@@ -40,6 +43,64 @@ TESTLIST_BEGIN (basics)
 TESTLIST_END ()
 
 static void remove_tree (const gchar * path);
+
+#ifdef G_OS_WIN32
+
+TESTCASE (debug_read_stream)
+{
+  gchar * dir = g_dir_make_tmp (NULL, NULL);
+  TestMessageItem * item;
+
+  PUSH_TIMEOUT (10000);
+  COMPILE_AND_LOAD_SCRIPT (
+      "const path = '%s/file';"
+      "fs.writeFileSync(path, 'Hello world');"
+      "const log = [];"
+      "const s = fs.createReadStream(path, { highWaterMark: 4 });"
+      "const originalRead = s._read.bind(s);"
+      "s._read = size => { log.push('_read ' + size); originalRead(size); };"
+      "s.on('data', c => log.push('data ' + c.length + ' ' + JSON.stringify(c.toString())))"
+      " .on('end', () => { log.push('end'); probeRaw(); })"
+      " .on('error', e => { log.push('error ' + e.message); probeRaw(); })"
+      " .on('close', () => log.push('close'));"
+      "function probeRaw() {"
+      "  const CreateFileW = new NativeFunction("
+      "      Process.getModuleByName('kernel32.dll').getExportByName('CreateFileW'),"
+      "      'pointer', ['pointer', 'uint', 'uint', 'pointer', 'uint', 'uint', 'pointer'],"
+      "      (Process.pointerSize === 4) ? { abi: 'stdcall' } : {});"
+      "  async function readAll(flags, size) {"
+      "    const handle = CreateFileW(Memory.allocUtf16String(path), 0x80000000, 1, NULL, 3, flags, NULL);"
+      "    const input = new Win32InputStream(handle, { autoClose: true });"
+      "    const sizes = [];"
+      "    for (let i = 0; i !== 6; i++) {"
+      "      const chunk = await input.read(size);"
+      "      sizes.push(chunk.byteLength);"
+      "      if (chunk.byteLength === 0) break;"
+      "    }"
+      "    await input.close();"
+      "    return sizes;"
+      "  }"
+      "  (async () => {"
+      "    log.push('raw overlapped 4: ' + JSON.stringify(await readAll(0x40000000, 4)));"
+      "    log.push('raw overlapped 5: ' + JSON.stringify(await readAll(0x40000000, 5)));"
+      "    log.push('raw plain 4: ' + JSON.stringify(await readAll(0, 4)));"
+      "    log.push('raw plain 5: ' + JSON.stringify(await readAll(0, 5)));"
+      "  })()"
+      "  .catch(e => log.push('raw error ' + e.stack))"
+      "  .then(() => send(log));"
+      "}",
+      ESCAPE_PATH (dir));
+
+  item = test_fixture_pop_message (fixture);
+  g_printerr ("\nDEBUG: %s\n", item->message);
+  test_message_item_free (item);
+  POP_TIMEOUT ();
+
+  remove_tree (dir);
+  g_free (dir);
+}
+
+#endif
 
 TESTCASE (stat_should_support_files)
 {
