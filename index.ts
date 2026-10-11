@@ -164,15 +164,15 @@ type ReadStreamOptions = {
 class ReadStream extends stream.Readable {
     #input: InputStream | null = null;
     #readRequest: Promise<void> | null = null;
-    #remaining: number;
+    #remaining: number | null;
 
-    constructor(path: string, { highWaterMark = 4 * 1024 * 1024, start = 0, end = Infinity }: ReadStreamOptions = {}) {
-        if (start > end)
+    constructor(path: string, { highWaterMark = 4 * 1024 * 1024, start = 0, end }: ReadStreamOptions = {}) {
+        if (end !== undefined && start > end)
             throw new RangeError(`The value of "start" (${start}) must be <= "end" (${end})`);
 
         super({ highWaterMark });
 
-        this.#remaining = end - start + 1;
+        this.#remaining = (end !== undefined) ? end - start + 1 : null;
 
         if (isWindows) {
             const api = getWindowsApi();
@@ -246,10 +246,12 @@ class ReadStream extends stream.Readable {
             return;
         }
 
-        this.#readRequest = this.#input!.read(Math.min(size, this.#remaining))
+        const remaining = this.#remaining;
+        this.#readRequest = this.#input!.read((remaining !== null) ? Math.min(size, remaining) : size)
             .then(buffer => {
                 this.#readRequest = null;
-                this.#remaining -= buffer.byteLength;
+                if (this.#remaining !== null)
+                    this.#remaining -= buffer.byteLength;
 
                 if (buffer.byteLength === 0) {
                     this.push(null);
